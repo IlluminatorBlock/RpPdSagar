@@ -1,0 +1,45 @@
+# ===============================
+# Parkinson's Multiagent System Requirements
+# ===============================
+
+# Core Python Dependencies
+# -----------------------
+python-dotenv>=1.0.0          # Environment variable management
+numpy>=1.26.0,<2.0.0          # Numerical computing (TensorFlow requirement)
+pillow>=10.0.0                # Image processing (PIL/Pillow for MRI handling)
+aiosqlite>=0.19.0             # Async SQLite database operations
+aiohttp>=3.9.0                # Async HTTP client for API calls
+
+# AI/ML Dependencies
+# ------------------
+tensorflow>=2.18.0            # Deep learning framework for Parkinson's model
+keras>=3.4.0                  # Standalone Keras for model loading/compatibility
+groq>=0.31.0                  # Groq API client for Llama model interactions
+sentence-transformers>=3.0.0  # Text embeddings for knowledge base search
+faiss-cpu>=1.12.0             # Vector similarity search for embeddings
+
+# Medical Imaging Dependencies
+# -----------------------------
+opencv-python>=4.12.0.88      # Computer vision for image processing
+pydicom>=2.4.3                # DICOM medical image format support
+nibabel>=5.1.0                # NIfTI neuroimaging data format support
+
+# Report Generation Dependencies
+# ------------------------------
+reportlab>=4.0.0              # PDF generation for medical reports
+
+# Development & Testing Dependencies
+# -----------------------------------
+pytest>=8.0.0                 # Testing framework
+pytest-asyncio>=1.0.0         # Async testing support for pytest
+pytest-mock>=3.11.1           # Mocking library for tests
+
+# Optional Dependencies (Web Interface - Not Required for Core System)
+# ---------------------------------------------------------------------
+# fastapi>=0.115.0            # Web API framework (optional web interface)
+# uvicorn>=0.24.0             # ASGI server (optional web deployment)
+
+# Optional Dependencies (Enhanced Monitoring - Not Required for Core System)
+# ---------------------------------------------------------------------------
+# structlog>=24.0.0           # Structured logging (optional advanced logging)
+# prometheus-client>=0.20.0   # Metrics collection (optional monitoring)
