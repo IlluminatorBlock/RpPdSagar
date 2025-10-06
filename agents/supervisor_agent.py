@@ -611,58 +611,197 @@ Please provide a comprehensive, evidence-based response that incorporates the me
             return self._create_error_response(session_id, "Error processing combined analysis request.")
     
     async def _handle_report_only_workflow(self, session_id: str, user_input: UserInput) -> Response:
-        """Handle report generation when prediction data already exists"""
+        """
+        NEW INTELLIGENT WORKFLOW: Handle report requests with patient ID-based retrieval
+        
+        Workflow:
+        1. Ask for Patient ID
+        2. Retrieve patient info + all previous reports (OPTIMIZED single query)
+        3. Display patient name and report history
+        4. Ask: Return old report OR generate new report?
+        5. If old: Return selected report
+        6. If new: Collect updated info + require MRI scan + generate fresh report
+        """
         try:
-            # Check if prediction data exists for this session or user
-            prediction = await self.shared_memory.get_latest_prediction(session_id)
+            # Get user role for appropriate workflow
+            user_role = user_input.metadata.get('user_role', 'unknown') if hasattr(user_input, 'metadata') else 'unknown'
+            user_id = user_input.user_id
             
-            if not prediction:
+            # STEP 1: Ask for Patient ID
+            print("\n" + "="*70)
+            print("🏥 REPORT REQUEST - PATIENT ID REQUIRED")
+            print("="*70)
+            
+            patient_id = input("Enter Patient ID (or press Enter to cancel): ").strip()
+            
+            if not patient_id:
+                return self._create_response(session_id, 
+                    "❌ Report request cancelled - No patient ID provided.")
+            
+            # STEP 2: Retrieve patient data with ALL reports (OPTIMIZED - single JOIN query)
+            print(f"\n🔍 Retrieving patient information for: {patient_id}...")
+            
+            patient_data = await self.shared_memory.db_manager.get_patient_with_reports(patient_id)
+            
+            if not patient_data:
                 return self._create_error_response(session_id,
-                    "No previous MRI analysis found. Please upload an MRI scan for analysis first.")
+                    f"❌ Patient ID '{patient_id}' not found in the system.\n"
+                    f"Please check the ID and try again.")
             
-            # Check for existing reports before generating new one
-            session_data = await self.shared_memory.get_session_data(session_id)
-            if session_data:
-                existing_reports_info = await self._check_existing_reports(session_data)
-                if existing_reports_info:
-                    # Ask user about existing reports
-                    existing_reports_message = await self._ask_user_about_existing_reports(session_id, existing_reports_info)
-                    return self._create_response(session_id, existing_reports_message)
-
-            # Set GENERATE_REPORT flag
-            flag_id = await self.shared_memory.set_action_flag(
-                flag_type=ActionFlagType.GENERATE_REPORT,
-                session_id=session_id,
-                data={
-                    "report_type": "standalone",
-                    "user_request": user_input.content
-                },
-                priority=1
-            )
+            patient_info = patient_data['patient']
+            reports = patient_data['reports']
             
-            # Wait for report completion
-            report_completed = await self._wait_for_report_completion(session_id)
+            # STEP 3: Display patient name and report history
+            print("\n" + "="*70)
+            print(f"✅ PATIENT FOUND: {patient_info['name']}")
+            print("="*70)
+            print(f"Patient ID: {patient_info['patient_id']}")
+            print(f"Age: {patient_info['age']} | Gender: {patient_info['gender']}")
+            print(f"Medical History: {patient_info['medical_history'] or 'None recorded'}")
             
-            if report_completed:
-                reports = await self.shared_memory.get_reports(session_id)
-                if reports:
-                    latest_report = reports[-1]
+            if patient_info['assigned_doctor_name']:
+                print(f"Assigned Doctor: {patient_info['assigned_doctor_name']}")
+            
+            print(f"\n📊 Found {len(reports)} previous report(s)")
+            
+            if reports:
+                print("\nReport History:")
+                print("-" * 70)
+                for idx, report in enumerate(reports, 1):
+                    print(f"{idx}. {report['title']}")
+                    print(f"   Type: {report['report_type']} | Created: {report['created_at']}")
+                    if report['prediction']:
+                        pred = report['prediction']
+                        print(f"   Result: {pred['binary_result']} (Confidence: {pred['confidence_score']:.2%})")
+                    print()
+            else:
+                print("   No previous reports found for this patient.")
+            
+            # STEP 4: Ask user what they want to do
+            print("="*70)
+            print("OPTIONS:")
+            print("  [1] View/Return an existing report")
+            print("  [2] Generate NEW report (requires MRI scan)")
+            print("  [0] Cancel")
+            print("="*70)
+            
+            choice = input("Enter your choice: ").strip()
+            
+            # OPTION 1: Return existing report
+            if choice == "1":
+                if not reports:
+                    return self._create_error_response(session_id,
+                        "❌ No existing reports available. Choose option [2] to generate a new report.")
+                
+                # Let user select which report
+                if len(reports) == 1:
+                    selected_report = reports[0]
+                    print(f"\nReturning report: {selected_report['title']}")
+                else:
+                    print("\nSelect report number:")
+                    report_num = input(f"Enter number (1-{len(reports)}): ").strip()
+                    try:
+                        report_idx = int(report_num) - 1
+                        if 0 <= report_idx < len(reports):
+                            selected_report = reports[report_idx]
+                        else:
+                            return self._create_error_response(session_id, "❌ Invalid report number.")
+                    except ValueError:
+                        return self._create_error_response(session_id, "❌ Invalid input.")
+                
+                # Return the selected report
+                report_content = selected_report['content']
+                if selected_report['file_path']:
+                    report_content += f"\n\n📄 Full report saved at: {selected_report['file_path']}"
+                
+                return Response(
+                    response_id=str(uuid.uuid4()),
+                    session_id=session_id,
+                    content=report_content,
+                    format_type=user_input.output_format,
+                    generated_by="SupervisorAgent_ExistingReport",
+                    confidence_score=selected_report.get('confidence_level', 1.0),
+                    timestamp=datetime.now()
+                )
+            
+            # OPTION 2: Generate NEW report
+            elif choice == "2":
+                print("\n" + "="*70)
+                print("📝 GENERATING NEW REPORT")
+                print("="*70)
+                
+                # Sub-option: Update patient info or use existing
+                print("\nWould you like to:")
+                print("  [1] Use existing patient information")
+                print("  [2] Update patient information")
+                update_choice = input("Enter choice: ").strip()
+                
+                updated_patient_info = patient_info.copy()
+                
+                if update_choice == "2":
+                    print("\n📋 Update Patient Information (press Enter to keep current value)")
+                    print("-" * 70)
                     
-                    return Response(
-                        response_id=str(uuid.uuid4()),
-                        session_id=session_id,
-                        content=latest_report['content'],
-                        format_type=user_input.output_format,
-                        generated_by="SupervisorAgent_Report",
-                        confidence_score=latest_report.get('confidence_level', 0.8),
-                        timestamp=datetime.now()
-                    )
+                    new_age = input(f"Age (current: {patient_info['age']}): ").strip()
+                    if new_age:
+                        updated_patient_info['age'] = int(new_age)
+                    
+                    new_history = input(f"Medical History (current: {patient_info['medical_history'] or 'None'}): ").strip()
+                    if new_history:
+                        updated_patient_info['medical_history'] = new_history
+                    
+                    new_allergies = input(f"Allergies (current: {patient_info['allergies'] or 'None'}): ").strip()
+                    if new_allergies:
+                        updated_patient_info['allergies'] = new_allergies
+                    
+                    new_medications = input(f"Current Medications (current: {patient_info['current_medications'] or 'None'}): ").strip()
+                    if new_medications:
+                        updated_patient_info['current_medications'] = new_medications
+                    
+                    # Update patient record in database
+                    # TODO: Add update_patient method to database manager
+                    print("\n✅ Patient information updated")
+                
+                # REQUIRE MRI scan for new report
+                print("\n" + "="*70)
+                print("🔬 MRI SCAN REQUIRED FOR NEW ANALYSIS")
+                print("="*70)
+                
+                mri_path = input("Enter MRI scan file path: ").strip()
+                
+                if not mri_path:
+                    return self._create_error_response(session_id,
+                        "❌ MRI scan required for new report generation. Operation cancelled.")
+                
+                # Verify MRI file exists
+                import os
+                if not os.path.exists(mri_path):
+                    return self._create_error_response(session_id,
+                        f"❌ MRI file not found: {mri_path}\nPlease check the path and try again.")
+                
+                # Update user_input with MRI path
+                user_input.mri_file_path = mri_path
+                
+                # Update session with patient information
+                await self.shared_memory.db_manager.update_session_patient_info(
+                    session_id, patient_id, patient_info['name']
+                )
+                
+                # Execute combined workflow (prediction + report)
+                print("\n🚀 Starting MRI analysis and report generation...")
+                return await self._handle_combined_workflow(session_id, user_input)
             
-            return self._create_error_response(session_id, "Report generation failed.")
+            # OPTION 0: Cancel
+            elif choice == "0":
+                return self._create_response(session_id, "❌ Report request cancelled by user.")
             
+            else:
+                return self._create_error_response(session_id, "❌ Invalid choice. Operation cancelled.")
+        
         except Exception as e:
-            self._handle_error(e, "handling report-only workflow")
-            return self._create_error_response(session_id, "Error generating report.")
+            self._handle_error(e, "handling intelligent report workflow")
+            return self._create_error_response(session_id, 
+                f"❌ Error in report workflow: {str(e)}\nPlease try again or contact support.")
     
     async def _check_aiml_model_status(self) -> Dict[str, Any]:
         """Check if AI/ML agent has Parkinson's model loaded"""

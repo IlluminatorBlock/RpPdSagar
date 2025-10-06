@@ -190,8 +190,8 @@ class SharedMemoryInterface:
             try:
                 logger.debug("[CLEANUP] Running additional cleanup cycle")
                 
-                # Cleanup expired sessions
-                expired_sessions = await self.db_manager.cleanup_expired_sessions()
+                # Cleanup expired sessions (older than 30 days)
+                expired_sessions = await self.db_manager.cleanup_old_sessions(days_old=30)
                 if expired_sessions > 0:
                     logger.info(f"[CLEANUP] Removed {expired_sessions} expired sessions")
                 

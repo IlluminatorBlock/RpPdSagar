@@ -377,9 +377,9 @@ class DatabaseManager:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 metadata JSON,
-                FOREIGN KEY (user_id) REFERENCES users(id),
-                FOREIGN KEY (patient_id) REFERENCES patients(id),
-                FOREIGN KEY (doctor_id) REFERENCES users(id)
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
+                FOREIGN KEY (patient_id) REFERENCES patients(patient_id) ON DELETE SET NULL,
+                FOREIGN KEY (doctor_id) REFERENCES users(id) ON DELETE SET NULL
             );
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);")
@@ -908,6 +908,117 @@ class DatabaseManager:
             """, (mri_file_path,))
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+    
+    async def get_patient_with_reports(self, patient_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get patient information with all their reports (OPTIMIZED with single JOIN query)
+        Returns: {
+            'patient': {...patient info...},
+            'reports': [{...report with prediction info...}]
+        }
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            # OPTIMIZED: Single query with JOINs instead of multiple queries
+            cursor = await db.execute("""
+                SELECT 
+                    p.patient_id,
+                    p.name as patient_name,
+                    p.age,
+                    p.gender,
+                    p.date_of_birth,
+                    p.medical_history,
+                    p.allergies,
+                    p.current_medications,
+                    p.emergency_contact_name,
+                    p.emergency_contact_phone,
+                    p.assigned_doctor_id,
+                    u.name as assigned_doctor_name,
+                    mr.id as report_id,
+                    mr.title as report_title,
+                    mr.report_type,
+                    mr.content as report_content,
+                    mr.created_at as report_created_at,
+                    mr.file_path as report_file_path,
+                    mr.confidence_level,
+                    pred.id as prediction_id,
+                    pred.binary_result,
+                    pred.stage_result,
+                    pred.confidence_score as pred_confidence,
+                    pred.binary_confidence,
+                    pred.stage_confidence,
+                    s.id as session_id,
+                    s.created_at as session_created_at,
+                    mri.id as mri_id,
+                    mri.file_path as mri_file_path,
+                    mri.original_filename as mri_filename
+                FROM patients p
+                LEFT JOIN doctors d ON p.assigned_doctor_id = d.doctor_id
+                LEFT JOIN users u ON d.user_id = u.id
+                LEFT JOIN sessions s ON p.patient_id = s.patient_id
+                LEFT JOIN medical_reports mr ON s.id = mr.session_id
+                LEFT JOIN predictions pred ON mr.prediction_id = pred.id
+                LEFT JOIN mri_scans mri ON s.id = mri.session_id
+                WHERE p.patient_id = ?
+                ORDER BY mr.created_at DESC
+            """, (patient_id,))
+            
+            rows = await cursor.fetchall()
+            
+            if not rows or not rows[0]['patient_id']:
+                return None
+            
+            # Build patient info from first row
+            first_row = rows[0]
+            patient_info = {
+                'patient_id': first_row['patient_id'],
+                'name': first_row['patient_name'],
+                'age': first_row['age'],
+                'gender': first_row['gender'],
+                'date_of_birth': first_row['date_of_birth'],
+                'medical_history': first_row['medical_history'],
+                'allergies': first_row['allergies'],
+                'current_medications': first_row['current_medications'],
+                'emergency_contact_name': first_row['emergency_contact_name'],
+                'emergency_contact_phone': first_row['emergency_contact_phone'],
+                'assigned_doctor_id': first_row['assigned_doctor_id'],
+                'assigned_doctor_name': first_row['assigned_doctor_name']
+            }
+            
+            # Build reports list from all rows
+            reports = []
+            seen_reports = set()
+            for row in rows:
+                if row['report_id'] and row['report_id'] not in seen_reports:
+                    seen_reports.add(row['report_id'])
+                    reports.append({
+                        'report_id': row['report_id'],
+                        'title': row['report_title'],
+                        'report_type': row['report_type'],
+                        'content': row['report_content'],
+                        'created_at': row['report_created_at'],
+                        'file_path': row['report_file_path'],
+                        'confidence_level': row['confidence_level'],
+                        'session_id': row['session_id'],
+                        'session_created_at': row['session_created_at'],
+                        'mri_file_path': row['mri_file_path'],
+                        'mri_filename': row['mri_filename'],
+                        'prediction': {
+                            'prediction_id': row['prediction_id'],
+                            'binary_result': row['binary_result'],
+                            'stage_result': row['stage_result'],
+                            'confidence_score': row['pred_confidence'],
+                            'binary_confidence': row['binary_confidence'],
+                            'stage_confidence': row['stage_confidence']
+                        } if row['prediction_id'] else None
+                    })
+            
+            return {
+                'patient': patient_info,
+                'reports': reports,
+                'report_count': len(reports)
+            }
     
     async def get_admin_dashboard(self) -> Dict[str, Any]:
         """Get comprehensive admin dashboard with all system statistics"""

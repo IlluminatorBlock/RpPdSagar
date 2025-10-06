@@ -227,7 +227,7 @@ class RAGAgent(ReportAgent):
                             session_data.patient_id = patient_id
                             session_data.patient_name = collected_patient_data.get('name')
                             # Update database directly
-                            await self.db_manager.update_session_patient_info(session_id, patient_id, collected_patient_data.get('name'))
+                            await self.shared_memory.db_manager.update_session_patient_info(session_id, patient_id, collected_patient_data.get('name'))
                         logger.info(f"✅ Admin collected patient data: {collected_patient_data.get('name')} ({patient_id})")
                     else:
                         logger.warning("Patient data collection cancelled or failed")
@@ -251,7 +251,7 @@ class RAGAgent(ReportAgent):
                             session_data.patient_id = patient_id
                             session_data.patient_name = collected_patient_data.get('name')
                             # Update database directly
-                            await self.db_manager.update_session_patient_info(session_id, patient_id, collected_patient_data.get('name'))
+                            await self.shared_memory.db_manager.update_session_patient_info(session_id, patient_id, collected_patient_data.get('name'))
                         logger.info(f"✅ Doctor collected patient data: {collected_patient_data.get('name')} ({patient_id})")
                     else:
                         logger.warning("Patient data collection cancelled or failed")
