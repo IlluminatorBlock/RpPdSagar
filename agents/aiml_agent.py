@@ -901,21 +901,3 @@ class AIMLAgent(PredictionAgent):
                 "confidence_threshold": self.confidence_threshold
             }
         }
-    
-    # Required abstract method implementations
-    async def process_task(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Process a generic task - delegates to specific methods"""
-        task_type = task_data.get('type')
-        
-        if task_type == 'mri_prediction':
-            session_id = task_data.get('session_id')
-            mri_file_path = task_data.get('mri_file_path')
-            
-            if session_id and mri_file_path:
-                result = await self.process_mri_scan(session_id, mri_file_path)
-                return {'status': 'completed', 'result': result}
-            else:
-                return {'status': 'error', 'message': 'Missing session_id or mri_file_path'}
-        
-        else:
-            return {'status': 'error', 'message': f'Unknown task type: {task_type}'}

@@ -23,10 +23,16 @@ faiss-cpu>=1.12.0             # Vector similarity search for embeddings
 opencv-python>=4.12.0.88      # Computer vision for image processing
 pydicom>=2.4.3                # DICOM medical image format support
 nibabel>=5.1.0                # NIfTI neuroimaging data format support
+PyPDF2>=3.0.1                 # PDF text extraction for knowledge base documents
 
 # Report Generation Dependencies
 # ------------------------------
 reportlab>=4.0.0              # PDF generation for medical reports
+Jinja2>=3.1.0                 # Template engine for report generation
+
+# Security Dependencies
+# ---------------------
+bcrypt>=4.0.0                 # Password hashing for authentication
 
 # Development & Testing Dependencies
 # -----------------------------------

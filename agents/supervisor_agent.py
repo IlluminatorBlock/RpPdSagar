@@ -110,9 +110,12 @@ class SupervisorAgent(BaseAgent, SupervisorInterface):
             metadata = {}
         
         try:
+            # Generate a unique session ID for each request
+            unique_session_id = f"session_{uuid.uuid4().hex[:8]}"
+            
             # Create UserInput object from simple message
             user_input = UserInput(
-                session_id=metadata.get("session_id", str(uuid.uuid4())),
+                session_id=unique_session_id,
                 user_id=metadata.get("user_id", "cli_user"),
                 patient_id=metadata.get("patient_id"),
                 doctor_id=metadata.get("doctor_id"),
@@ -154,7 +157,17 @@ class SupervisorAgent(BaseAgent, SupervisorInterface):
             
         except Exception as e:
             self._handle_error(e, "processing user input")
-            return self._create_error_response(user_input.session_id if 'user_input' in locals() else "unknown", str(e))
+            # Provide user-friendly error messages instead of raw database errors
+            if "UNIQUE constraint failed" in str(e):
+                error_msg = "Unable to process request due to a system conflict. Please try again."
+            elif "database is locked" in str(e):
+                error_msg = "System is temporarily busy. Please try again in a moment."
+            elif "no such table" in str(e):
+                error_msg = "System configuration issue. Please contact administrator."
+            else:
+                error_msg = "An unexpected error occurred. Please try again or contact support if the issue persists."
+            
+            return self._create_error_response(user_input.session_id if 'user_input' in locals() else "unknown", error_msg)
     
     async def _analyze_user_intent(self, user_input: UserInput) -> Dict[str, Any]:
         """
@@ -319,8 +332,8 @@ class SupervisorAgent(BaseAgent, SupervisorInterface):
     
     async def handle_chat_request(self, user_input: UserInput) -> Response:
         """
-        Handle chat-only requests without prediction or reporting.
-        Uses Groq API for conversational responses.
+        Handle chat-only requests using RAG knowledge base first, then Groq for enhancement.
+        This provides evidence-based medical information for all queries.
         """
         try:
             # Get session context if available
@@ -333,24 +346,105 @@ class SupervisorAgent(BaseAgent, SupervisorInterface):
                         "input_type": session_data.input_type.value,
                         "previous_interactions": "none"  # Could be expanded
                     }
-            
-            # Use Groq service for chat response
-            chat_response = await self.groq_service.handle_chat_request(
-                user_input.content, session_context
-            )
-            
+
+            # STEP 1: Search knowledge base for medical information
+            knowledge_results = []
+            try:
+                # Get embeddings manager via database
+                embeddings_manager = self.shared_memory.db_manager.get_embeddings_manager()
+                
+                if embeddings_manager:
+                    # Extract key medical terms from query
+                    query_text = user_input.content.lower()
+                    
+                    # Simple keyword extraction for better search
+                    medical_keywords = []
+                    if 'parkinson' in query_text:
+                        medical_keywords.append('parkinson disease')
+                    if 'symptom' in query_text:
+                        medical_keywords.append('symptoms')
+                    if 'treatment' in query_text:
+                        medical_keywords.append('treatment therapy')
+                    if 'depression' in query_text:
+                        medical_keywords.append('depression mood')
+                    
+                    # Use enhanced query or fallback to original
+                    search_query = ' '.join(medical_keywords) if medical_keywords else user_input.content
+                    
+                    logger.info(f"Searching knowledge base with query: '{search_query}' (original: '{user_input.content}')")
+                    
+                    # Search for relevant medical knowledge
+                    search_results = await embeddings_manager.search_similar(
+                        query_text=search_query,
+                        k=5  # Get top 5 relevant chunks
+                    )
+                    
+                    # Format knowledge for context
+                    for result in search_results:
+                        similarity_score = result.get('similarity', 0.0)
+                        knowledge_results.append({
+                            'content': result.get('text', ''),
+                            'source': result.get('metadata', {}).get('source_file', 'Medical Literature'),
+                            'similarity': similarity_score
+                        })
+                        logger.info(f"Found result with similarity {similarity_score:.4f} from {result.get('metadata', {}).get('source_file', 'Unknown')}")
+                    
+                    logger.info(f"Total search results: {len(search_results)}, formatted results: {len(knowledge_results)}")
+                    
+                    if len(knowledge_results) == 0:
+                        logger.warning(f"No knowledge results found for query '{search_query}' - check similarity threshold ({getattr(embeddings_manager, 'similarity_threshold', 'unknown')})")
+                else:
+                    logger.warning("Embeddings manager not available for chat")
+                    
+            except Exception as e:
+                logger.warning(f"Knowledge search failed for chat: {e}")
+
+            # STEP 2: Use Groq to generate response with medical knowledge context
+            if knowledge_results:
+                # Prepare context with medical knowledge
+                medical_context = "Based on medical literature:\n\n"
+                for i, kb_entry in enumerate(knowledge_results[:3], 1):  # Use top 3 results
+                    if kb_entry['similarity'] > 0.2:  # Only use relevant results
+                        medical_context += f"Source {i} ({kb_entry['source']}):\n{kb_entry['content'][:300]}...\n\n"
+                
+                # Enhanced prompt with medical knowledge
+                enhanced_query = f"""As a medical AI assistant, please provide an informative response based on the medical literature provided and the user's question.
+
+Medical Knowledge Context:
+{medical_context}
+
+User Question: {user_input.content}
+
+Please provide a comprehensive, evidence-based response that incorporates the medical knowledge above. Include relevant medical information while being clear that this is for educational purposes only and not a substitute for professional medical advice."""
+
+                chat_response = await self.groq_service.handle_chat_request(
+                    enhanced_query, session_context
+                )
+                
+                # Add source attribution
+                sources = [kb_entry['source'] for kb_entry in knowledge_results[:3] if kb_entry['similarity'] > 0.2]
+                if sources:
+                    chat_response += f"\n\n📚 Information sourced from: {', '.join(set(sources))}"
+                
+            else:
+                # Fallback to standard Groq response if no knowledge found
+                chat_response = await self.groq_service.handle_chat_request(
+                    user_input.content, session_context
+                )
+                chat_response += "\n\n💡 Note: This response uses general AI knowledge. For evidence-based medical information, please be more specific with your query."
+
             return Response(
                 response_id=str(uuid.uuid4()),
                 session_id=user_input.session_id,
                 content=chat_response,
                 format_type=user_input.output_format,
-                generated_by="SupervisorAgent_Chat",
-                confidence_score=0.8,  # High confidence for chat responses
+                generated_by="SupervisorAgent_RAG_Enhanced",
+                confidence_score=0.9 if knowledge_results else 0.7,
                 timestamp=datetime.now()
             )
-            
+
         except Exception as e:
-            self._handle_error(e, "handling chat request")
+            self._handle_error(e, "handling RAG-enhanced chat request")
             return self._create_error_response(user_input.session_id, 
                                              "I apologize, but I'm having trouble processing your request right now.")
     
@@ -789,54 +883,6 @@ Confidence Score: {confidence_str}
             confidence_score=1.0,
             timestamp=datetime.now()
         )
-    
-    async def process_task(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Process a task assigned to the supervisor agent.
-        Note: Supervisor primarily handles user input via process_user_input.
-        This method handles internal system tasks.
-        """
-        task_type = task_data.get('type', 'unknown')
-        session_id = task_data.get('session_id', 'system')
-        
-        try:
-            if task_type == 'system_status':
-                return await self.health_check()
-            
-            elif task_type == 'session_cleanup':
-                # Clean up old sessions
-                cutoff_time = datetime.now() - timedelta(hours=24)
-                await self.shared_memory.cleanup_old_sessions(cutoff_time)
-                return {'status': 'completed', 'action': 'session_cleanup'}
-            
-            elif task_type == 'flag_status_report':
-                # Report on current action flags
-                pending = await self.shared_memory.get_pending_action_flags()
-                claimed = await self.shared_memory.get_claimed_action_flags()
-                completed = await self.shared_memory.get_completed_action_flags()
-                
-                return {
-                    'status': 'completed',
-                    'flag_summary': {
-                        'pending': len(pending),
-                        'claimed': len(claimed), 
-                        'completed': len(completed)
-                    }
-                }
-            
-            else:
-                logger.warning(f"Unknown task type for supervisor: {task_type}")
-                return {
-                    'status': 'failed',
-                    'error': f'Unknown task type: {task_type}'
-                }
-                
-        except Exception as e:
-            logger.error(f"Error processing supervisor task {task_type}: {e}")
-            return {
-                'status': 'failed',
-                'error': str(e)
-            }
     
     async def health_check(self) -> Dict[str, Any]:
         """Health check for supervisor agent"""

@@ -21,8 +21,10 @@ logger = logging.getLogger(__name__)
 # Note: In production, these would be real embedding libraries
 # For development, we'll use mock implementations
 try:
-    import sentence_transformers
+    # Import sentence transformers only when available
+    from sentence_transformers import SentenceTransformer   
     SENTENCE_TRANSFORMERS_AVAILABLE = True
+    logger.info("sentence-transformers import check passed")
 except ImportError:
     SENTENCE_TRANSFORMERS_AVAILABLE = False
     logger.warning("sentence-transformers not available - using mock embeddings")
@@ -30,6 +32,7 @@ except ImportError:
 try:
     import faiss
     FAISS_AVAILABLE = True
+    logger.info("faiss successfully imported")
 except ImportError:
     FAISS_AVAILABLE = False
     logger.warning("faiss not available - using simple similarity search")
@@ -91,11 +94,20 @@ class EmbeddingsManager:
             logger.info("Initializing embeddings model...")
             
             if SENTENCE_TRANSFORMERS_AVAILABLE:
-                # In production, would initialize actual model
-                # self.model = SentenceTransformer(self.model_name)
-                logger.info("Using mock sentence transformer model")
+                logger.info(f"Loading sentence transformer model: {self.model_name}")
+                # Import and load the actual model - this may take some time
+                try:
+                    self.model = SentenceTransformer(self.model_name)
+                    logger.info("Sentence transformer model loaded successfully")
+                    self.using_real_embeddings = True
+                except Exception as e:
+                    logger.warning(f"Failed to load sentence transformer model: {e}")
+                    self.model = None
+                    self.using_real_embeddings = False
             else:
-                logger.info("Using mock embedding model")
+                logger.warning("Sentence transformers not available - using mock embeddings")
+                self.model = None
+                self.using_real_embeddings = False
             
             # Initialize search index
             await self._initialize_search_index()
@@ -229,50 +241,37 @@ class EmbeddingsManager:
             return []
     
     async def _extract_text_from_pdf(self, file_path: Path) -> str:
-        """Extract text from PDF file"""
+        """Extract text from PDF file using PyPDF2"""
         try:
-            # For production, would use PyPDF2 or pdfplumber
-            # For now, simulate PDF extraction
+            import PyPDF2
             logger.debug(f"Extracting text from PDF: {file_path.name}")
-            
-            # Mock PDF content based on filename
-            if 'parkinson' in file_path.name.lower():
-                return """
-                Parkinson's Disease: A Comprehensive Medical Guide
-                
-                Parkinson's disease is a progressive neurodegenerative disorder that affects predominantly dopamine-producing neurons in a specific area of the brain called substantia nigra. The disease is characterized by motor symptoms including tremor, rigidity, bradykinesia, and postural instability.
-                
-                Pathophysiology:
-                The primary pathological hallmark of Parkinson's disease is the loss of dopaminergic neurons in the substantia nigra pars compacta. This leads to a reduction in dopamine levels in the striatum, causing the characteristic motor symptoms. α-synuclein protein aggregates form Lewy bodies, which are pathological markers of the disease.
-                
-                Clinical Diagnosis:
-                Diagnosis is primarily clinical, based on the presence of cardinal motor features. The UK Parkinson's Disease Society Brain Bank criteria are commonly used. Supportive criteria include unilateral onset, persistent asymmetry, progressive course, and excellent response to levodopa.
-                
-                Motor Symptoms:
-                1. Tremor: Typically rest tremor with 4-6 Hz frequency
-                2. Rigidity: Increased muscle tone, cogwheel rigidity
-                3. Bradykinesia: Slowness of movement, decreased amplitude
-                4. Postural instability: Balance problems, falls
-                
-                Non-Motor Symptoms:
-                1. Cognitive impairment and dementia
-                2. Depression and anxiety
-                3. Sleep disorders
-                4. Autonomic dysfunction
-                5. Olfactory dysfunction
-                
-                Treatment Approaches:
-                1. Pharmacological therapy: Levodopa, dopamine agonists, MAO-B inhibitors
-                2. Deep brain stimulation for advanced cases
-                3. Physical therapy and exercise
-                4. Speech therapy
-                5. Occupational therapy
-                
-                Prognosis:
-                Progressive disease with variable course. Early diagnosis and appropriate treatment can significantly improve quality of life and functional capacity.
-                """
-            else:
-                return f"Medical document content from {file_path.name}"
+
+            with open(file_path, 'rb') as file:
+                pdf_reader = PyPDF2.PdfReader(file)
+                text = ""
+
+                # Extract text from all pages
+                for page_num in range(len(pdf_reader.pages)):
+                    page = pdf_reader.pages[page_num]
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+
+                # Clean up the extracted text
+                text = text.strip()
+                if len(text) < 100:
+                    logger.warning(f"Very little text extracted from {file_path.name}: {len(text)} characters")
+                else:
+                    logger.info(f"Extracted {len(text)} characters from {file_path.name}")
+
+                return text
+
+        except ImportError:
+            logger.error("PyPDF2 not available for PDF extraction")
+            return ""
+        except Exception as e:
+            logger.error(f"Failed to extract text from PDF {file_path.name}: {e}")
+            return ""
                 
         except Exception as e:
             logger.error(f"Failed to extract PDF text: {e}")
@@ -625,11 +624,7 @@ Magnetic Resonance Imaging (MRI) plays an increasingly important role in the eva
             processed_text = await self._preprocess_text(text)
             
             # Generate embedding
-            if self.model:
-                # In production: embedding = self.model.encode(processed_text)
-                embedding = await self._generate_mock_embedding(processed_text)
-            else:
-                embedding = await self._generate_mock_embedding(processed_text)
+            embedding = await self._generate_embedding(processed_text)
             
             # Cache the embedding
             if self.enable_caching:
@@ -906,6 +901,24 @@ Magnetic Resonance Imaging (MRI) plays an increasingly important role in the eva
         
         return processed
     
+    async def _generate_embedding(self, text: str) -> np.ndarray:
+        """Generate embedding for text using sentence transformer or fallback to mock"""
+        if self.model is not None and SENTENCE_TRANSFORMERS_AVAILABLE:
+            try:
+                # Use real sentence transformer model
+                embedding = self.model.encode(text, convert_to_numpy=True)
+                # Ensure it's float32 for FAISS compatibility
+                embedding = embedding.astype(np.float32)
+                # Normalize to unit vector for cosine similarity
+                embedding = embedding / np.linalg.norm(embedding)
+                return embedding
+            except Exception as e:
+                logger.warning(f"Failed to generate real embedding, falling back to mock: {e}")
+                return await self._generate_mock_embedding(text)
+        else:
+            # Fallback to mock embeddings
+            return await self._generate_mock_embedding(text)
+    
     async def _generate_mock_embedding(self, text: str) -> np.ndarray:
         """Generate mock embedding for development purposes"""
         await asyncio.sleep(0.1)  # Simulate embedding generation time
@@ -923,21 +936,30 @@ Magnetic Resonance Imaging (MRI) plays an increasingly important role in the eva
     async def _initialize_search_index(self):
         """Initialize the search index for similarity search"""
         if FAISS_AVAILABLE:
-            # In production: self.index = faiss.IndexFlatIP(self.embedding_dimension)
-            logger.info("Using mock FAISS index")
+            logger.info("Initializing FAISS index for vector search")
+            self.index = faiss.IndexFlatIP(self.embedding_dimension)  # Inner product for cosine similarity
+            self.id_to_index = {}
+            self.index_to_id = {}
+            self.next_index_id = 0
+            logger.info("FAISS index initialized successfully")
         else:
-            # Use simple in-memory storage
+            # Use simple in-memory storage as fallback
             self.index = {}
-            logger.info("Using simple in-memory index")
+            logger.warning("FAISS not available - using simple in-memory index")
     
     async def _add_to_index(self, text_id: str, embedding: np.ndarray):
         """Add embedding to the search index"""
-        if isinstance(self.index, dict):
-            # Simple in-memory storage
-            self.index[text_id] = embedding
+        if hasattr(self.index, 'add'):  # FAISS index
+            # FAISS doesn't support text IDs directly, so we maintain a mapping
+            if text_id not in self.id_to_index:
+                # Add new vector to FAISS
+                self.index.add(embedding.reshape(1, -1))
+                self.id_to_index[text_id] = self.next_index_id
+                self.index_to_id[self.next_index_id] = text_id
+                self.next_index_id += 1
         else:
-            # Would use FAISS in production
-            pass
+            # Fallback to simple in-memory storage
+            self.index[text_id] = embedding
     
     async def _update_index(self, text_id: str, embedding: np.ndarray):
         """Update embedding in the search index"""
@@ -960,12 +982,36 @@ Magnetic Resonance Imaging (MRI) plays an increasingly important role in the eva
         results = []
         
         if isinstance(self.index, dict):
-            # Simple cosine similarity search
+            # Dictionary-based cosine similarity search
             similarities = []
+            
+            # Normalize query embedding
+            query_norm = np.linalg.norm(query_embedding)
+            if query_norm == 0:
+                logger.warning("Query embedding has zero norm")
+                return results
+                
+            query_normalized = query_embedding / query_norm
+            
             for text_id, embedding in self.index.items():
-                similarity = np.dot(query_embedding, embedding)
-                if similarity >= similarity_threshold:
-                    similarities.append((text_id, similarity))
+                try:
+                    # Normalize stored embedding
+                    embedding_norm = np.linalg.norm(embedding)
+                    if embedding_norm == 0:
+                        continue
+                        
+                    embedding_normalized = embedding / embedding_norm
+                    
+                    # Calculate cosine similarity (dot product of normalized vectors)
+                    similarity = np.dot(query_normalized, embedding_normalized)
+                    
+                    # Apply threshold (cosine similarity ranges from -1 to 1)
+                    if similarity >= similarity_threshold:
+                        similarities.append((text_id, similarity))
+                        
+                except Exception as e:
+                    logger.warning(f"Error calculating similarity for {text_id}: {e}")
+                    continue
             
             # Sort by similarity and take top k
             similarities.sort(key=lambda x: x[1], reverse=True)
@@ -974,6 +1020,45 @@ Magnetic Resonance Imaging (MRI) plays an increasingly important role in the eva
                     'id': text_id,
                     'similarity': float(similarity)
                 })
+        
+        elif hasattr(self.index, 'search'):
+            # FAISS-based search
+            try:
+                import faiss
+                logger.debug(f"Using FAISS search with query shape: {query_embedding.shape}")
+                
+                # FAISS expects 2D array
+                query_vector = query_embedding.reshape(1, -1).astype(np.float32)
+                
+                # Search FAISS index
+                scores, indices = self.index.search(query_vector, k)
+                
+                # Convert results
+                for i, (score, idx) in enumerate(zip(scores[0], indices[0])):
+                    if idx >= 0:  # Valid index
+                        # Convert FAISS inner product score to similarity
+                        # For normalized vectors, inner product = cosine similarity
+                        similarity = float(score)
+                        
+                        # Apply threshold
+                        if similarity >= similarity_threshold:
+                            # Get text_id from index mapping
+                            text_id = self.index_to_id.get(idx) if hasattr(self, 'index_to_id') else f"idx_{idx}"
+                            
+                            results.append({
+                                'id': text_id,
+                                'similarity': similarity
+                            })
+                            
+                logger.info(f"FAISS search returned {len(results)} results above threshold {similarity_threshold}")
+                
+            except Exception as e:
+                logger.error(f"FAISS search failed: {e}")
+                # Fallback to no results
+                pass
+        
+        else:
+            logger.warning(f"Unknown index type: {type(self.index)}")
         
         return results
     

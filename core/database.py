@@ -27,21 +27,131 @@ from models.data_models import (
 logger = logging.getLogger(__name__)
 
 
-class DatabaseManager:
-    """
-    Central database manager for all system data operations.
-    Implements the complete database schema with async operations.
-    """
+class DatabaseConnection:
+    """Database connection context manager that enables foreign keys"""
     
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self.connection_pool = None
+        self.connection = None
+    
+    async def __aenter__(self):
+        self.connection = await aiosqlite.connect(self.db_path)
+        await self.connection.execute("PRAGMA foreign_keys = ON")
+        return self.connection
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.connection:
+            await self.connection.close()
+
+
+class DatabaseManager:
+    """Enhanced database manager for all system data operations.
+    Implements the complete database schema with async operations.
+    """
+    
+    def __init__(self, db_path: str = "data/parkinsons_system.db"):
+        """Initialize database manager"""
+        self.db_path = db_path
+        self.embeddings_manager = None  # Will be initialized during database setup
         self._ensure_db_directory()
     
     def _ensure_db_directory(self):
         """Ensure the database directory exists"""
         db_dir = Path(self.db_path).parent
         db_dir.mkdir(parents=True, exist_ok=True)
+    
+    def get_connection(self):
+        """Get database connection context manager with foreign keys enabled"""
+        return DatabaseConnection(self.db_path)
+    
+    def get_embeddings_manager(self):
+        """Get the embeddings manager if initialized"""
+        return getattr(self, 'embeddings_manager', None)
+    
+    async def _initialize_embeddings_on_demand(self):
+        """Initialize embeddings manager only when database is set up"""
+        try:
+            logger.info("Initializing embeddings manager during database setup...")
+            
+            # Only import when needed to avoid loading ML libraries unnecessarily
+            from knowledge_base.embeddings_manager import EmbeddingsManager
+            
+            # Import config to get current settings
+            from config import config
+            embeddings_config = config.embeddings_config
+            
+            # Initialize and store as database attribute for access by agents
+            self.embeddings_manager = EmbeddingsManager(embeddings_config)
+            await self.embeddings_manager.initialize()
+            
+            logger.info("✅ Embeddings manager initialized successfully and attached to database")
+            return True
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Embeddings initialization failed: {e} - continuing without embeddings")
+            self.embeddings_manager = None
+            return False
+
+    async def _load_existing_embeddings(self):
+        """Load existing embeddings manager without creating new embeddings"""
+        try:
+            # Check if embeddings directory exists and has content
+            from config import config
+            embeddings_config = config.embeddings_config
+            embeddings_dir = Path(embeddings_config.get('embeddings_dir', 'data/embeddings'))
+            
+            # Look for existing embeddings files
+            embeddings_files = []
+            if embeddings_dir.exists():
+                embeddings_files.extend(embeddings_dir.glob('*.pkl'))
+                embeddings_files.extend(embeddings_dir.glob('*.json'))
+                embeddings_files.extend(embeddings_dir.glob('*.faiss'))
+            
+            if embeddings_files:
+                logger.info(f"Found existing embeddings files: {len(embeddings_files)} files")
+                
+                # Initialize embeddings manager to load existing data
+                from knowledge_base.embeddings_manager import EmbeddingsManager
+                self.embeddings_manager = EmbeddingsManager(embeddings_config)
+                await self.embeddings_manager.initialize()
+                
+                # Embeddings are automatically loaded during initialize()
+                
+                # Check if we successfully loaded embeddings
+                if hasattr(self.embeddings_manager, 'id_to_text') and self.embeddings_manager.id_to_text:
+                    chunk_count = len(self.embeddings_manager.id_to_text)
+                    logger.info(f"✅ Loaded {chunk_count} existing embeddings successfully")
+                else:
+                    logger.warning("⚠️ Embeddings files found but no content loaded")
+                    self.embeddings_manager = None
+            else:
+                logger.info("No existing embeddings found - RAG agent will have limited functionality")
+                self.embeddings_manager = None
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to load existing embeddings: {e}")
+            self.embeddings_manager = None
+
+    async def close(self):
+        """Close database connections"""
+        logger.debug("[LIFECYCLE] Closing DatabaseManager")
+        
+        try:
+            # Close any open connections in the pool
+            if hasattr(self, 'connection_pool') and self.connection_pool:
+                # For aiosqlite, we don't have a persistent pool, but we ensure cleanup
+                logger.debug("[DATABASE] Cleaning up connection pool")
+                logger.info("Database connections cleaned up")
+            
+            logger.info("Database manager closed successfully")
+            
+        except Exception as e:
+            logger.error(f"Error closing database: {e}")
+            raise
+    
+    async def initialize(self) -> None:
+        """Initialize the database - calls init_database for compatibility"""
+        await self.init_database()
     
     async def _migrate_database(self) -> None:
         """Migrate existing database to new schema"""
@@ -83,8 +193,12 @@ class DatabaseManager:
                 logger.error(f"Database migration failed: {e}")
                 # Continue anyway - the create table methods will handle missing tables
     
-    async def init_database(self) -> None:
-        """Initialize database with complete schema"""
+    async def init_database(self, initialize_embeddings: bool = False) -> None:
+        """
+        Initialize database with complete schema
+        Args:
+            initialize_embeddings: If True, also initialize embeddings (use only during setup)
+        """
         # Run migrations first
         await self._migrate_database()
         
@@ -94,53 +208,158 @@ class DatabaseManager:
             
             # Create all tables (IF NOT EXISTS will skip existing ones)
             await self._create_users_table(db)
+            await self._create_doctors_table(db)
             await self._create_patients_table(db)
+            # NOTE: Removed old _create_reports_table() - deprecated, use medical_reports instead
+            await self._create_embeddings_table(db)
+            await self._create_audit_logs_table(db)
             await self._create_sessions_table(db)
             await self._create_mri_scans_table(db)
             await self._create_predictions_table(db)
-            await self._create_medical_reports_table(db)
+            await self._create_medical_reports_table(db)  # This is the NEW reports table
             await self._create_knowledge_entries_table(db)
             await self._create_lab_results_table(db)
             await self._create_action_flags_table(db)
             await self._create_agent_messages_table(db)
             
             await db.commit()
-            logger.info("Database initialized successfully")
+            
+            # Only initialize embeddings if explicitly requested (during setup)
+            if initialize_embeddings:
+                logger.info("Initializing embeddings as requested...")
+                embeddings_success = await self._initialize_embeddings_on_demand()
+                
+                if embeddings_success:
+                    logger.info("✅ Database initialized successfully with embeddings support")
+                else:
+                    logger.info("✅ Database initialized successfully (embeddings initialization failed)")
+            else:
+                # Try to load existing embeddings manager if it exists
+                await self._load_existing_embeddings()
+                logger.info("✅ Database initialized successfully (embeddings loaded if available)")
     
     async def _create_users_table(self, db: aiosqlite.Connection):
-        """Create users table"""
+        """Create users table with enhanced schema"""
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
+                username TEXT UNIQUE,
                 email TEXT UNIQUE,
-                name TEXT,
-                user_type TEXT DEFAULT 'patient',
-                preferences JSON,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_users_type ON users(user_type);")
-    
-    async def _create_patients_table(self, db: aiosqlite.Connection):
-        """Create patients table"""
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS patients (
-                id TEXT PRIMARY KEY,
+                password_hash TEXT,
                 name TEXT NOT NULL,
+                role TEXT NOT NULL CHECK (role IN ('admin', 'doctor', 'patient')),
                 age INTEGER,
                 gender TEXT,
-                medical_history JSON,
-                contact_info JSON,
-                assigned_doctor TEXT,
+                specialization TEXT,  -- For doctors
+                license_number TEXT,  -- For doctors
+                phone TEXT,
+                address TEXT,
+                is_active BOOLEAN DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (assigned_doctor) REFERENCES users(id)
+                last_login TIMESTAMP
             );
         """)
+        await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username);")
+        await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_users_active ON users(is_active);")
+    
+    async def _create_doctors_table(self, db: aiosqlite.Connection):
+        """Create doctors table with doctor-specific information"""
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS doctors (
+                doctor_id TEXT PRIMARY KEY,
+                user_id TEXT UNIQUE NOT NULL,
+                specialization TEXT,
+                license_number TEXT UNIQUE,
+                years_experience INTEGER,
+                hospital_affiliation TEXT,
+                consultation_fee DECIMAL(10,2),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_doctors_user_id ON doctors(user_id);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_doctors_specialization ON doctors(specialization);")
+        await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_doctors_license ON doctors(license_number);")
+
+    async def _create_patients_table(self, db: aiosqlite.Connection):
+        """Create patients table with patient-specific information"""
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS patients (
+                patient_id TEXT PRIMARY KEY,
+                user_id TEXT UNIQUE,
+                name TEXT NOT NULL,
+                age INTEGER,
+                gender TEXT CHECK (gender IN ('male', 'female', 'other')),
+                date_of_birth DATE,
+                medical_history TEXT,
+                emergency_contact_name TEXT,
+                emergency_contact_phone TEXT,
+                assigned_doctor_id TEXT,
+                insurance_info TEXT,
+                allergies TEXT,
+                current_medications TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (assigned_doctor_id) REFERENCES doctors(doctor_id)
+            );
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_patients_user_id ON patients(user_id);")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_patients_name ON patients(name);")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_patients_assigned_doctor ON patients(assigned_doctor);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_patients_assigned_doctor ON patients(assigned_doctor_id);")
+
+    # DEPRECATED: Old reports table removed - use medical_reports table instead
+    # This method has been deleted to avoid confusion and data duplication
+    # The new medical_reports table provides enhanced functionality
+
+    async def _create_embeddings_table(self, db: aiosqlite.Connection):
+        """Create embeddings table for vector storage"""
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS embeddings (
+                embedding_id TEXT PRIMARY KEY,
+                content_id TEXT NOT NULL,
+                content_type TEXT NOT NULL CHECK (content_type IN ('report', 'knowledge', 'document')),
+                text_content TEXT NOT NULL,
+                embedding_vector BLOB NOT NULL,
+                model_name TEXT NOT NULL,
+                chunk_index INTEGER DEFAULT 0,
+                metadata JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_content_id ON embeddings(content_id);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_content_type ON embeddings(content_type);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_model ON embeddings(model_name);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_created_at ON embeddings(created_at);")
+
+    async def _create_audit_logs_table(self, db: aiosqlite.Connection):
+        """Create audit logs table for tracking all system actions"""
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                log_id TEXT PRIMARY KEY,
+                action TEXT NOT NULL,
+                actor_id TEXT NOT NULL,
+                actor_role TEXT NOT NULL CHECK (actor_role IN ('admin', 'doctor', 'patient')),
+                target_id TEXT,
+                target_type TEXT,
+                details JSON,
+                ip_address TEXT,
+                user_agent TEXT,
+                success BOOLEAN DEFAULT 1,
+                error_message TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_actor_id ON audit_logs(actor_id);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_target_id ON audit_logs(target_id);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_success ON audit_logs(success);")
 
     async def _create_sessions_table(self, db: aiosqlite.Connection):
         """Create sessions table"""
@@ -409,9 +628,17 @@ class DatabaseManager:
         """Get all patients assigned to a doctor"""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM patients WHERE assigned_doctor = ?", (doctor_id,))
+            cursor = await db.execute("SELECT * FROM patients WHERE assigned_doctor_id = ?", (doctor_id,))
             rows = await cursor.fetchall()
             return [dict_to_patient(dict(row)) for row in rows]
+    
+    async def get_all_patients(self) -> List[Dict[str, Any]]:
+        """Get all patients in the system"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM patients ORDER BY created_at DESC")
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
     
     async def check_existing_reports(self, patient_id: str) -> List[Dict[str, Any]]:
         """Check if patient has existing reports"""
@@ -463,6 +690,22 @@ class DatabaseManager:
             """, (status.value, session_id))
             await db.commit()
             return True
+    
+    async def update_session_patient_info(self, session_id: str, patient_id: str, patient_name: str) -> bool:
+        """Update session with patient information"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("""
+                    UPDATE sessions 
+                    SET patient_id = ?, patient_name = ?, updated_at = CURRENT_TIMESTAMP 
+                    WHERE id = ?
+                """, (patient_id, patient_name, session_id))
+                await db.commit()
+                logger.info(f"Updated session {session_id} with patient info: {patient_name} ({patient_id})")
+                return True
+        except Exception as e:
+            logger.error(f"Failed to update session patient info: {e}")
+            return False
     
     # Action Flag Operations
     async def create_action_flag(self, action_flag: ActionFlag) -> str:
@@ -651,6 +894,172 @@ class DatabaseManager:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
     
+    async def get_reports_by_mri_scan(self, mri_file_path: str) -> List[Dict[str, Any]]:
+        """Get all reports associated with a specific MRI scan file"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            # Find session_id from mri_scans, then get reports from that session
+            cursor = await db.execute("""
+                SELECT mr.*
+                FROM medical_reports mr
+                INNER JOIN mri_scans mri ON mr.session_id = mri.session_id
+                WHERE mri.file_path = ?
+                ORDER BY mr.created_at DESC
+            """, (mri_file_path,))
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+    
+    async def get_admin_dashboard(self) -> Dict[str, Any]:
+        """Get comprehensive admin dashboard with all system statistics"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            # Get total counts
+            cursor = await db.execute("SELECT COUNT(*) as total FROM doctors")
+            total_doctors = (await cursor.fetchone())['total']
+            
+            cursor = await db.execute("SELECT COUNT(*) as total FROM patients")
+            total_patients = (await cursor.fetchone())['total']
+            
+            cursor = await db.execute("SELECT COUNT(*) as total FROM medical_reports")
+            total_reports = (await cursor.fetchone())['total']
+            
+            cursor = await db.execute("SELECT COUNT(*) as total FROM sessions WHERE status = 'active'")
+            active_sessions = (await cursor.fetchone())['total']
+            
+            # Get doctors with patient counts
+            cursor = await db.execute("""
+                SELECT 
+                    d.doctor_id,
+                    d.name as doctor_name,
+                    d.specialty,
+                    d.license_number,
+                    COUNT(DISTINCT p.patient_id) as patient_count,
+                    COUNT(DISTINCT s.id) as session_count
+                FROM doctors d
+                LEFT JOIN patients p ON d.doctor_id = p.assigned_doctor_id
+                LEFT JOIN sessions s ON d.doctor_id = s.doctor_id
+                GROUP BY d.doctor_id
+                ORDER BY patient_count DESC
+            """)
+            doctors_data = [dict(row) for row in await cursor.fetchall()]
+            
+            # Get patients with report counts and assigned doctor info
+            cursor = await db.execute("""
+                SELECT 
+                    p.patient_id,
+                    p.name as patient_name,
+                    p.age,
+                    p.gender,
+                    p.assigned_doctor_id,
+                    d.name as doctor_name,
+                    COUNT(DISTINCT s.id) as session_count,
+                    COUNT(DISTINCT mr.id) as report_count
+                FROM patients p
+                LEFT JOIN doctors d ON p.assigned_doctor_id = d.doctor_id
+                LEFT JOIN sessions s ON p.patient_id = s.patient_id
+                LEFT JOIN medical_reports mr ON s.id = mr.session_id
+                GROUP BY p.patient_id
+                ORDER BY report_count DESC
+            """)
+            patients_data = [dict(row) for row in await cursor.fetchall()]
+            
+            # Get recent activity
+            cursor = await db.execute("""
+                SELECT 
+                    mr.id,
+                    mr.title,
+                    mr.report_type,
+                    mr.created_at,
+                    s.patient_name,
+                    s.doctor_name
+                FROM medical_reports mr
+                INNER JOIN sessions s ON mr.session_id = s.id
+                ORDER BY mr.created_at DESC
+                LIMIT 10
+            """)
+            recent_reports = [dict(row) for row in await cursor.fetchall()]
+            
+            return {
+                'summary': {
+                    'total_doctors': total_doctors,
+                    'total_patients': total_patients,
+                    'total_reports': total_reports,
+                    'active_sessions': active_sessions
+                },
+                'doctors': doctors_data,
+                'patients': patients_data,
+                'recent_reports': recent_reports
+            }
+    
+    async def get_doctor_dashboard(self, doctor_id: str) -> Dict[str, Any]:
+        """Get dashboard for a specific doctor showing their assigned patients and reports"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            # Get doctor info
+            cursor = await db.execute("SELECT * FROM doctors WHERE doctor_id = ?", (doctor_id,))
+            doctor_info = dict(await cursor.fetchone())
+            
+            # Get assigned patients with report counts
+            cursor = await db.execute("""
+                SELECT 
+                    p.patient_id,
+                    p.name as patient_name,
+                    p.age,
+                    p.gender,
+                    p.medical_history,
+                    p.emergency_contact,
+                    COUNT(DISTINCT s.id) as session_count,
+                    COUNT(DISTINCT mr.id) as report_count,
+                    MAX(mr.created_at) as last_report_date
+                FROM patients p
+                LEFT JOIN sessions s ON p.patient_id = s.patient_id
+                LEFT JOIN medical_reports mr ON s.id = mr.session_id
+                WHERE p.assigned_doctor_id = ?
+                GROUP BY p.patient_id
+                ORDER BY last_report_date DESC
+            """, (doctor_id,))
+            patients_data = [dict(row) for row in await cursor.fetchall()]
+            
+            # Get recent reports for this doctor's patients
+            cursor = await db.execute("""
+                SELECT 
+                    mr.id,
+                    mr.title,
+                    mr.report_type,
+                    mr.created_at,
+                    mr.file_path,
+                    s.patient_name,
+                    p.patient_id
+                FROM medical_reports mr
+                INNER JOIN sessions s ON mr.session_id = s.id
+                INNER JOIN patients p ON s.patient_id = p.patient_id
+                WHERE p.assigned_doctor_id = ?
+                ORDER BY mr.created_at DESC
+                LIMIT 20
+            """, (doctor_id,))
+            recent_reports = [dict(row) for row in await cursor.fetchall()]
+            
+            # Get session statistics
+            cursor = await db.execute("""
+                SELECT 
+                    COUNT(DISTINCT s.id) as total_sessions,
+                    COUNT(DISTINCT CASE WHEN s.status = 'active' THEN s.id END) as active_sessions,
+                    COUNT(DISTINCT p.patient_id) as total_patients
+                FROM sessions s
+                INNER JOIN patients p ON s.patient_id = p.patient_id
+                WHERE p.assigned_doctor_id = ?
+            """, (doctor_id,))
+            stats = dict(await cursor.fetchone())
+            
+            return {
+                'doctor_info': doctor_info,
+                'statistics': stats,
+                'patients': patients_data,
+                'recent_reports': recent_reports
+            }
+    
     # Knowledge Base Operations
     async def store_knowledge_entry(self, entry: KnowledgeEntry) -> str:
         """Store knowledge base entry"""
@@ -804,56 +1213,3 @@ class DatabaseManager:
                 'error': str(e),
                 'timestamp': datetime.now().isoformat()
             }
-    
-    async def cleanup_expired_sessions(self) -> int:
-        """
-        Clean up expired sessions from the database.
-        Returns the number of expired sessions removed.
-        """
-        try:
-            # For now, implement basic cleanup based on created_at timestamp
-            # Sessions older than 24 hours are considered expired
-            from datetime import datetime, timedelta
-            
-            cutoff_time = datetime.now() - timedelta(hours=24)
-            
-            async with aiosqlite.connect(self.db_path) as db:
-                # Count expired sessions first
-                cursor = await db.execute(
-                    "SELECT COUNT(*) FROM sessions WHERE created_at < ?",
-                    (cutoff_time.isoformat(),)
-                )
-                count_result = await cursor.fetchone()
-                expired_count = count_result[0] if count_result else 0
-                
-                # Delete expired sessions
-                if expired_count > 0:
-                    await db.execute(
-                        "DELETE FROM sessions WHERE created_at < ?",
-                        (cutoff_time.isoformat(),)
-                    )
-                    await db.commit()
-                    logger.info(f"Cleaned up {expired_count} expired sessions")
-                
-                return expired_count
-                
-        except Exception as e:
-            logger.error(f"Error cleaning up expired sessions: {e}")
-            return 0
-    
-    async def close(self):
-        """Close database connections and cleanup resources"""
-        logger.debug("[LIFECYCLE] Closing DatabaseManager")
-        
-        try:
-            # Close any open connections in the pool
-            if hasattr(self, 'connection_pool') and self.connection_pool:
-                # For aiosqlite, we don't have a persistent pool, but we ensure cleanup
-                logger.debug("[DATABASE] Cleaning up connection pool")
-                logger.info("Database connections cleaned up")
-            
-            logger.info("Database manager closed successfully")
-            
-        except Exception as e:
-            logger.error(f"Error closing database: {e}")
-            raise

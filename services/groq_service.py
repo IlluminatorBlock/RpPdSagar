@@ -310,30 +310,31 @@ class GroqService:
         """
         system_prompt = """You are a medical report generation AI specializing in Parkinson's disease.
         
+        CRITICAL: You MUST respond with ONLY valid JSON - no markdown, no extra text, no code blocks.
+        
         TASK: Generate a comprehensive medical report based on:
         1. MRI prediction results
-        2. Relevant medical knowledge
+        2. Relevant medical knowledge33
         3. Patient information (if available)
         
-        CONTEXT: This is part of an EXPLICIT report generation workflow - the user has specifically requested a medical report.
+        Generate a formal medical report with clean, readable content.
         
-        Generate a formal medical report with:
-        - Executive Summary
-        - Clinical Findings
-        - Diagnostic Assessment
-        - Recommendations
-        - References to medical knowledge
-        
-        Return response in JSON format:
+        RESPONSE FORMAT (ONLY this JSON structure):
         {
-            "title": "Report title",
-            "executive_summary": "Brief overview",
-            "clinical_findings": "Detailed findings",
-            "diagnostic_assessment": "Diagnostic conclusion",
-            "recommendations": ["list", "of", "recommendations"],
-            "confidence_level": 0.0-1.0,
-            "disclaimer": "Medical disclaimer text"
-        }"""
+            "title": "Clear report title",
+            "executive_summary": "Brief 2-3 sentence overview for medical professionals",
+            "clinical_findings": "Clean paragraph describing findings WITHOUT embedded JSON or code",
+            "diagnostic_assessment": "Clear diagnostic conclusion in plain medical language",
+            "recommendations": ["actionable recommendation 1", "actionable recommendation 2", "actionable recommendation 3"],
+            "confidence_level": 0.85,
+            "disclaimer": "Standard medical AI disclaimer"
+        }
+        
+        IMPORTANT: 
+        - Use clean, professional medical language
+        - NO embedded JSON in text fields
+        - NO markdown formatting in JSON values
+        - Each field should be readable plain text"""
         
         # Compile knowledge context
         knowledge_context = "\n".join([
@@ -360,15 +361,32 @@ class GroqService:
         response = await self._make_request(messages, temperature=0.4, max_tokens=2000)
         
         try:
+            # First try to parse as direct JSON
             report_data = json.loads(response.content)
             return report_data
-        except json.JSONDecodeError as e:
-            logger.warning(f"Groq report response not in JSON format, using fallback: {e}")
-            # Return a structured fallback report using the raw content
+        except json.JSONDecodeError:
+            # Try to extract JSON from mixed content
+            try:
+                import re
+                # Look for JSON within the response
+                json_match = re.search(r'\{[\s\S]*\}', response.content)
+                if json_match:
+                    json_text = json_match.group()
+                    report_data = json.loads(json_text)
+                    return report_data
+            except:
+                pass
+            
+            logger.warning(f"Groq report response not in valid JSON format, creating structured fallback")
+            
+            # Clean the raw content for better fallback
+            clean_content = response.content.replace('```json', '').replace('```', '').strip()
+            
+            # Return a structured fallback report with cleaned content
             return {
                 "title": "Parkinson's Disease Analysis Report",
                 "executive_summary": "MRI analysis completed using AI-assisted evaluation. This report provides preliminary findings for clinical review.",
-                "clinical_findings": response.content if response.content else "Analysis completed with mock prediction data.",
+                "clinical_findings": f"Analysis Results:\n{clean_content[:1000]}..." if clean_content else "Analysis completed successfully.",
                 "diagnostic_assessment": "Early-stage Parkinson's disease indicators detected with moderate confidence. Further clinical evaluation recommended.",
                 "recommendations": [
                     "Follow-up with movement disorder specialist",
