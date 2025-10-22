@@ -22,7 +22,16 @@ from models.data_models import (
 from services.groq_service import GroqService
 from services.mri_processor import MRIProcessor
 
-# Try to import TensorFlow for real model support
+# Try to import ONNX Runtime for real model support
+try:
+    import onnxruntime as ort
+    import numpy as np
+    ONNX_AVAILABLE = True
+except ImportError:
+    ort = None
+    ONNX_AVAILABLE = False
+
+# Legacy TensorFlow support (deprecated, using ONNX now)
 try:
     import tensorflow as tf
     TF_AVAILABLE = True
@@ -83,10 +92,15 @@ class AIMLAgent(PredictionAgent):
         self.mri_processor = mri_processor
         
         # Model configuration
-        self.model_version = config.get('model_version', 'v1.0')
+        self.model_version = config.get('model_version', 'v3.0-ONNX')
         self.confidence_threshold = config.get('confidence_threshold', 0.7)
         
-        # TensorFlow model (will be loaded during initialization)
+        # ONNX model session (will be loaded during initialization)
+        self.onnx_session = None
+        self.model_input_name = None
+        self.model_output_name = None
+        
+        # Legacy TensorFlow model (deprecated)
         self.model = None
         
         # Processing statistics
@@ -106,10 +120,10 @@ class AIMLAgent(PredictionAgent):
         if not self.groq_service.session:
             await self.groq_service.initialize()
         
-        # Initialize TensorFlow model if available
-        print("[SIMPLE] About to call _initialize_tensorflow_model")
-        await self._initialize_tensorflow_model()
-        print("[SIMPLE] Finished calling _initialize_tensorflow_model")
+        # Initialize ONNX model if available
+        print("[SIMPLE] About to call _initialize_onnx_model")
+        await self._initialize_onnx_model()
+        print("[SIMPLE] Finished calling _initialize_onnx_model")
         
         self.logger.info("AI/ML Agent initialized - monitoring for PREDICT_PARKINSONS flags")
         print(f"[PRINT] EXITING AIMLAgent.initialize method")
@@ -149,8 +163,57 @@ class AIMLAgent(PredictionAgent):
         """Legacy method - use shutdown() instead"""
         await self.shutdown()
     
+    async def _initialize_onnx_model(self):
+        """Initialize ONNX model for real predictions"""
+        logger.info("="*80)
+        logger.info("🔧 Initializing ONNX Model for Parkinson's Classification")
+        logger.info("="*80)
+        
+        if not ONNX_AVAILABLE:
+            logger.warning("⚠️ ONNX Runtime not available. Install with: pip install onnxruntime")
+            logger.warning("   Falling back to Groq AI for predictions")
+            self.onnx_session = None
+            return
+        
+        try:
+            # Path to ONNX model
+            model_path = os.path.join(os.path.dirname(__file__), '..', 'models', 'model.onnx')
+            
+            logger.info(f"📁 Model path: {model_path}")
+            logger.info(f"📊 File exists: {os.path.exists(model_path)}")
+            
+            if not os.path.exists(model_path):
+                logger.error(f"❌ ONNX model not found at: {model_path}")
+                self.onnx_session = None
+                return
+            
+            # Load ONNX model
+            logger.info("📥 Loading ONNX model...")
+            self.onnx_session = ort.InferenceSession(model_path)
+            
+            # Get input/output names
+            self.model_input_name = self.onnx_session.get_inputs()[0].name
+            self.model_output_name = self.onnx_session.get_outputs()[0].name
+            
+            # Log model specifications
+            input_shape = self.onnx_session.get_inputs()[0].shape
+            output_shape = self.onnx_session.get_outputs()[0].shape
+            
+            logger.info("✅ ONNX Model loaded successfully!")
+            logger.info(f"   Input: {self.model_input_name} → {input_shape}")
+            logger.info(f"   Output: {self.model_output_name} → {output_shape}")
+            logger.info(f"   Expected input: [1, 3, 224, 224] (Batch, RGB, Height, Width)")
+            logger.info(f"   Expected output: [1, 6] (Negative + 5 Stages)")
+            logger.info("="*80)
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to load ONNX model: {e}")
+            import traceback
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            self.onnx_session = None
+    
     async def _initialize_tensorflow_model(self):
-        """Initialize TensorFlow model for real predictions with comprehensive audit logging - FIXED"""
+        """Initialize TensorFlow model for real predictions with comprehensive audit logging - DEPRECATED: Use ONNX instead"""
         print(f"[PRINT] ENTERED AIMLAgent._initialize_tensorflow_model method")
         print(f"[SIMPLE-START] Very first line of _initialize_tensorflow_model")
         print(f"[SIMPLE] Starting TensorFlow model initialization. TF_AVAILABLE: {TF_AVAILABLE}")
@@ -263,6 +326,66 @@ class AIMLAgent(PredictionAgent):
         
         print(f"[PRINT] EXITING AIMLAgent._initialize_tensorflow_model method")
     
+    async def _initialize_onnx_model(self):
+        """
+        Initialize ONNX model for real predictions
+        Model: model.onnx
+        Input: [1, 3, 224, 224] - RGB image (channels-first format)
+        Output: [1, 6] - 6 classes (Negative + Stage 1-5)
+        """
+        print(f"[PRINT] ENTERED AIMLAgent._initialize_onnx_model method")
+        logger.info("🔄 Initializing ONNX model for Parkinson's classification...")
+        
+        # Check if ONNX Runtime is available
+        if not ONNX_AVAILABLE:
+            logger.warning("⚠️  ONNX Runtime not available. Install with: pip install onnxruntime")
+            logger.warning("⚠️  Falling back to Groq AI for predictions")
+            self.onnx_session = None
+            return
+        
+        try:
+            # Model path
+            model_path = os.path.join(os.path.dirname(__file__), '..', 'models', 'model.onnx')
+            
+            # Check if model file exists
+            if not os.path.exists(model_path):
+                logger.error(f"❌ ONNX model not found at: {model_path}")
+                logger.warning("⚠️  Falling back to Groq AI for predictions")
+                self.onnx_session = None
+                return
+            
+            # Get file size
+            file_size_mb = os.path.getsize(model_path) / (1024 * 1024)
+            logger.info(f"📁 Model file: {model_path} ({file_size_mb:.2f} MB)")
+            
+            # Create ONNX Runtime session
+            logger.info("🔧 Loading ONNX model...")
+            self.onnx_session = ort.InferenceSession(model_path)
+            
+            # Get input/output names and shapes
+            self.model_input_name = self.onnx_session.get_inputs()[0].name
+            self.model_output_name = self.onnx_session.get_outputs()[0].name
+            
+            input_shape = self.onnx_session.get_inputs()[0].shape
+            output_shape = self.onnx_session.get_outputs()[0].shape
+            
+            logger.info(f"✅ ONNX model loaded successfully!")
+            logger.info(f"📊 Input: {self.model_input_name} -> {input_shape}")
+            logger.info(f"📊 Output: {self.model_output_name} -> {output_shape}")
+            logger.info(f"🎯 Model expects: [batch, 3, 224, 224] RGB image (channels-first)")
+            logger.info(f"🎯 Model outputs: [batch, 6] classes (Negative + Stage 1-5)")
+            
+            print(f"[SIMPLE] ONNX model loaded! Input: {self.model_input_name}, Output: {self.model_output_name}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to load ONNX model: {type(e).__name__}: {str(e)}")
+            logger.warning("⚠️  Falling back to Groq AI for predictions")
+            self.onnx_session = None
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()[:500]}")
+        
+        print(f"[PRINT] EXITING AIMLAgent._initialize_onnx_model method")
+    
     async def _setup_event_subscriptions(self):
         """Setup event subscriptions specific to AI/ML processing"""
         await super()._setup_event_subscriptions()
@@ -353,6 +476,32 @@ class AIMLAgent(PredictionAgent):
             )
             
             prediction_id = await self.shared_memory.store_prediction(prediction)
+            
+            # ========== SAVE MRI TO TRAINING DATASET ==========
+            try:
+                # Get patient ID from session
+                session_data = await self.shared_memory.get_session_data(session_id)
+                patient_id = getattr(session_data, 'patient_id', 'UNKNOWN') if session_data else 'UNKNOWN'
+                
+                # Save MRI with DICOM-style labeling for future training
+                save_result = await self.mri_processor.save_mri_for_training(
+                    source_file_path=mri_file_path,
+                    patient_id=patient_id,
+                    diagnosis=prediction.binary_result,
+                    stage=prediction.stage_result,
+                    session_id=session_id,
+                    metadata={
+                        'confidence': prediction.confidence_score,
+                        'binary_confidence': prediction.binary_confidence,
+                        'stage_confidence': prediction.stage_confidence,
+                        'prediction_id': prediction_id,
+                        'timestamp': datetime.now().isoformat()
+                    }
+                )
+                logger.info(f"✅ MRI saved to training dataset: {save_result['filename']}")
+            except Exception as save_error:
+                logger.error(f"⚠️ Failed to save MRI to training dataset: {save_error}")
+                # Don't fail the whole prediction if saving fails
             
             # Complete the action flag
             await self.shared_memory.complete_action_flag(flag_id)
@@ -518,20 +667,31 @@ class AIMLAgent(PredictionAgent):
                     
                 logger.info(f"[MODEL_RELOAD] Model reload result: {has_model}")
             
-            logger.info(f"[MODEL_CHECK] Has TensorFlow model: {has_model}")
+            # Check for ONNX model first (preferred)
+            has_onnx = self.onnx_session is not None
+            has_processed_data = 'processed_data' in features
+            
+            logger.info(f"[MODEL_CHECK] Has ONNX model: {has_onnx}")
             logger.info(f"[MODEL_CHECK] Has processed_data: {has_processed_data}")
             if has_processed_data:
                 logger.info(f"[MODEL_CHECK] Processed data type: {type(features['processed_data'])}")
             logger.info(f"[MODEL_CHECK] Available feature keys: {list(features.keys())}")
             
-            # Check if we have a real model and processed data
-            if has_model and has_processed_data:
-                logger.info("[MODEL_CHECK] ✅ Using real TensorFlow model")
-                result = await self._classify_with_real_model(features)
-                print(f"[PRINT] EXITING AIMLAgent.classify_parkinsons method (real model path)")
+            # Use ONNX model if available (preferred)
+            if has_onnx and has_processed_data:
+                logger.info("[MODEL_CHECK] ✅ Using ONNX model")
+                result = await self._classify_with_onnx_model(features)
+                print(f"[PRINT] EXITING AIMLAgent.classify_parkinsons method (onnx model path)")
                 return result
+            # Fallback to TensorFlow if available
+            elif has_model and has_processed_data:
+                logger.info("[MODEL_CHECK] ⚠️  Using legacy TensorFlow model")
+                result = await self._classify_with_real_model(features)
+                print(f"[PRINT] EXITING AIMLAgent.classify_parkinsons method (tensorflow fallback)")
+                return result
+            # Final fallback to Groq
             else:
-                logger.warning(f"[MODEL_CHECK] ❌ Falling back to Groq. Model: {has_model}, Data: {has_processed_data}")
+                logger.warning(f"[MODEL_CHECK] ❌ Falling back to Groq. ONNX: {has_onnx}, TF: {has_model}, Data: {has_processed_data}")
                 result = await self._classify_with_groq(features)
                 print(f"[PRINT] EXITING AIMLAgent.classify_parkinsons method (groq fallback path)")
                 return result
@@ -550,8 +710,132 @@ class AIMLAgent(PredictionAgent):
             print(f"[PRINT] EXITING AIMLAgent.classify_parkinsons method (with exception)")
             return result
     
+    async def _classify_with_onnx_model(self, features: Dict[str, Any]) -> Dict[str, Any]:
+        """Classify using the ONNX model - Input: [1,3,224,224], Output: [1,6]"""
+        logger.info("🔬 Starting ONNX model classification")
+        start_time = datetime.now()
+        
+        try:
+            # Get processed image data
+            processed_image = features.get('processed_data')
+            if processed_image is None:
+                raise ValueError("No processed image data found")
+            
+            # Extract image array
+            if isinstance(processed_image, dict):
+                image_array = processed_image.get('processed_array') or processed_image.get('image_array')
+            else:
+                image_array = processed_image
+            
+            if image_array is None:
+                raise ValueError("No image array found in processed data")
+            
+            logger.info(f"📊 Input image shape before preprocessing: {image_array.shape}")
+            
+            # Preprocess for ONNX model: [1, 3, 224, 224]
+            # Expected: Batch=1, Channels=3 (RGB), Height=224, Width=224
+            from PIL import Image as PILImage
+            import cv2
+            
+            # Convert to PIL Image if needed
+            if isinstance(image_array, np.ndarray):
+                # Normalize if needed
+                if image_array.max() > 1.0:
+                    image_array = image_array / 255.0
+                
+                # Ensure RGB
+                if len(image_array.shape) == 2:  # Grayscale
+                    image_array = np.stack([image_array]*3, axis=-1)
+                elif image_array.shape[-1] == 1:  # Grayscale with channel
+                    image_array = np.repeat(image_array, 3, axis=-1)
+                
+                # Resize to 224x224
+                if image_array.shape[0] != 224 or image_array.shape[1] != 224:
+                    image_array = cv2.resize(image_array, (224, 224))
+                
+                # Convert from HWC to CHW format: (224, 224, 3) → (3, 224, 224)
+                if image_array.shape[-1] == 3:
+                    image_array = np.transpose(image_array, (2, 0, 1))
+                
+                # Add batch dimension: (3, 224, 224) → (1, 3, 224, 224)
+                image_array = np.expand_dims(image_array, axis=0)
+                
+                # Ensure float32
+                image_array = image_array.astype(np.float32)
+            
+            logger.info(f"📊 Final input shape for ONNX: {image_array.shape}")
+            logger.info(f"📊 Input dtype: {image_array.dtype}")
+            logger.info(f"📊 Input range: [{image_array.min():.3f}, {image_array.max():.3f}]")
+            
+            # Run ONNX inference
+            logger.info("🚀 Running ONNX inference...")
+            onnx_inputs = {self.model_input_name: image_array}
+            onnx_outputs = self.onnx_session.run([self.model_output_name], onnx_inputs)
+            predictions = onnx_outputs[0]
+            
+            logger.info(f"📊 Raw ONNX output shape: {predictions.shape}")
+            logger.info(f"📊 Raw predictions: {predictions}")
+            
+            # Parse output: [1, 6] where classes are: [Negative, Stage1, Stage2, Stage3, Stage4, Stage5]
+            class_probs = predictions[0]  # Remove batch dimension
+            predicted_class = np.argmax(class_probs)
+            confidence = float(class_probs[predicted_class])
+            
+            logger.info(f"📊 Class probabilities: {class_probs}")
+            logger.info(f"📊 Predicted class: {predicted_class}")
+            logger.info(f"📊 Confidence: {confidence:.4f}")
+            
+            # Map to binary result and stage
+            if predicted_class == 0:
+                binary_result = 'Negative'
+                stage_result = 'N/A'
+                stage_confidence = 0.0
+            else:
+                binary_result = 'Positive'
+                stage_result = str(predicted_class)  # Classes 1-5 map to stages 1-5
+                stage_confidence = confidence
+            
+            # Calculate binary confidence (Negative vs any Positive stage)
+            negative_prob = float(class_probs[0])
+            positive_prob = float(np.sum(class_probs[1:]))  # Sum of all positive stages
+            binary_confidence = max(negative_prob, positive_prob)
+            
+            processing_time = (datetime.now() - start_time).total_seconds()
+            
+            logger.info("✅ ONNX Classification complete!")
+            logger.info(f"   Binary: {binary_result} ({binary_confidence*100:.1f}%)")
+            logger.info(f"   Stage: {stage_result} ({stage_confidence*100:.1f}%)")
+            logger.info(f"   Time: {processing_time:.3f}s")
+            
+            return {
+                'binary_classification': binary_result,
+                'stage_classification': stage_result,
+                'confidence_scores': {
+                    'binary_confidence': binary_confidence,
+                    'stage_confidence': stage_confidence
+                },
+                'class_probabilities': class_probs.tolist(),
+                'key_indicators': [
+                    f"ONNX model prediction: Class {predicted_class}",
+                    f"Confidence: {confidence*100:.1f}%",
+                    f"Processing time: {processing_time:.3f}s"
+                ],
+                'uncertainty_factors': [],
+                'recommendations': [
+                    "Review with medical professional",
+                    "Consider clinical correlation"
+                ]
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ ONNX classification failed: {e}")
+            import traceback
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            # Fallback to Groq
+            return await self._classify_with_groq(features)
+    
     async def _classify_with_real_model(self, features: Dict[str, Any]) -> Dict[str, Any]:
-        """Classify using the real TensorFlow model with comprehensive prediction audit"""
+        """Classify using the real TensorFlow model with comprehensive prediction audit - DEPRECATED: Use ONNX"""
         print(f"[PRINT] ENTERED AIMLAgent._classify_with_real_model method")
         start_time = datetime.now()
         

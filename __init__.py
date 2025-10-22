@@ -7,9 +7,10 @@ __description__ = "Multiagent system for Parkinson's disease analysis with expli
 
 # Import main components for easy access
 from .main import ParkinsonsMultiagentSystem
-from .config import config
+from .config import config, Config
 
 __all__ = [
     'ParkinsonsMultiagentSystem',
-    'config'
+    'config',
+    'Config'
 ]

@@ -407,7 +407,7 @@ class SupervisorAgent(BaseAgent, SupervisorInterface):
                     if kb_entry['similarity'] > 0.2:  # Only use relevant results
                         medical_context += f"Source {i} ({kb_entry['source']}):\n{kb_entry['content'][:300]}...\n\n"
                 
-                # Enhanced prompt with medical knowledge
+                # Enhanced prompt with medical knowledge and formatting request
                 enhanced_query = f"""As a medical AI assistant, please provide an informative response based on the medical literature provided and the user's question.
 
 Medical Knowledge Context:
@@ -415,16 +415,24 @@ Medical Knowledge Context:
 
 User Question: {user_input.content}
 
-Please provide a comprehensive, evidence-based response that incorporates the medical knowledge above. Include relevant medical information while being clear that this is for educational purposes only and not a substitute for professional medical advice."""
+Please provide a comprehensive, evidence-based response that incorporates the medical knowledge above. 
+Format your response with proper markdown:
+- Use **bold** for important medical terms
+- Use bullet points (•) for lists
+- Use headings (##) for sections
+- Include line breaks for readability
+- Keep paragraphs concise and well-structured
+
+Include relevant medical information while being clear that this is for educational purposes only and not a substitute for professional medical advice."""
 
                 chat_response = await self.groq_service.handle_chat_request(
                     enhanced_query, session_context
                 )
                 
-                # Add source attribution
+                # Add formatted source attribution
                 sources = [kb_entry['source'] for kb_entry in knowledge_results[:3] if kb_entry['similarity'] > 0.2]
                 if sources:
-                    chat_response += f"\n\n📚 Information sourced from: {', '.join(set(sources))}"
+                    chat_response += f"\n\n---\n📚 **Sources:** {', '.join(set(sources))}"
                 
             else:
                 # Fallback to standard Groq response if no knowledge found

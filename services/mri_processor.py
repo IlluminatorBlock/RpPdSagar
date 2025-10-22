@@ -441,6 +441,135 @@ class MRIProcessor:
         except Exception as e:
             logger.error(f"Error reading file as binary: {e}")
             raise
+    
+    async def save_mri_for_training(
+        self,
+        source_file_path: str,
+        patient_id: str,
+        diagnosis: str,
+        stage: Optional[str] = None,
+        session_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, str]:
+        """
+        Save MRI scan to data/mri_scans with DICOM-style metadata for future model training.
+        
+        Creates organized structure:
+        data/mri_scans/
+            positive/
+                stage_1/
+                    PD_POS_S1_PATIENT123_20251022_143052.jpg
+                    PD_POS_S1_PATIENT123_20251022_143052.json
+                stage_2/
+                ...
+            negative/
+                PD_NEG_PATIENT456_20251022_143105.jpg
+                PD_NEG_PATIENT456_20251022_143105.json
+        
+        Args:
+            source_file_path: Original uploaded file path
+            patient_id: Patient identifier
+            diagnosis: 'Positive' or 'Negative'
+            stage: Stage number (1-5) if positive diagnosis
+            session_id: Analysis session ID
+            metadata: Additional metadata to store
+            
+        Returns:
+            Dictionary with saved file paths and metadata file path
+        """
+        try:
+            import json
+            import shutil
+            from datetime import datetime
+            
+            # Determine base directory structure
+            base_dir = Path("data/mri_scans")
+            
+            # Organize by diagnosis and stage
+            if diagnosis.lower() == 'positive':
+                if stage:
+                    save_dir = base_dir / "positive" / f"stage_{stage}"
+                else:
+                    save_dir = base_dir / "positive" / "unclassified"
+            else:
+                save_dir = base_dir / "negative"
+            
+            # Create directory if it doesn't exist
+            save_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Generate DICOM-style filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            diagnosis_code = "POS" if diagnosis.lower() == 'positive' else "NEG"
+            stage_code = f"_S{stage}" if stage else ""
+            
+            # Filename format: PD_[POS/NEG]_[S#]_PATIENT###_TIMESTAMP
+            base_filename = f"PD_{diagnosis_code}{stage_code}_{patient_id}_{timestamp}"
+            
+            # Get file extension from source
+            source_ext = Path(source_file_path).suffix
+            if not source_ext:
+                source_ext = '.jpg'  # Default to jpg
+            
+            image_filename = base_filename + source_ext
+            metadata_filename = base_filename + ".json"
+            
+            image_path = save_dir / image_filename
+            metadata_path = save_dir / metadata_filename
+            
+            # Copy the image file
+            shutil.copy2(source_file_path, image_path)
+            logger.info(f"✅ Saved MRI image to: {image_path}")
+            
+            # Create DICOM-style metadata JSON
+            dicom_metadata = {
+                "PatientID": patient_id,
+                "StudyDate": datetime.now().strftime("%Y%m%d"),
+                "StudyTime": datetime.now().strftime("%H%M%S"),
+                "Modality": "MRI",
+                "StudyDescription": "Parkinson's Disease Brain MRI",
+                "SeriesDescription": "T1-weighted brain scan",
+                "Diagnosis": diagnosis,
+                "Stage": stage if stage else "N/A",
+                "SessionID": session_id if session_id else "N/A",
+                "Timestamp": datetime.now().isoformat(),
+                "SourceFile": str(source_file_path),
+                "SavedFile": str(image_path),
+                "Classification": {
+                    "Category": "positive" if diagnosis.lower() == 'positive' else "negative",
+                    "Stage": stage,
+                    "Confidence": metadata.get('confidence', 0.0) if metadata else 0.0
+                },
+                "ProcessingInfo": {
+                    "ProcessedDate": datetime.now().isoformat(),
+                    "System": "Parkinson's Multiagent AI System",
+                    "Version": "3.0.0"
+                }
+            }
+            
+            # Add any additional metadata
+            if metadata:
+                dicom_metadata["AdditionalMetadata"] = metadata
+            
+            # Save metadata JSON
+            with open(metadata_path, 'w') as f:
+                json.dump(dicom_metadata, f, indent=2)
+            
+            logger.info(f"✅ Saved DICOM-style metadata to: {metadata_path}")
+            logger.info(f"📊 Training dataset: {diagnosis_code}{stage_code} - Total in {save_dir}: {len(list(save_dir.glob('*.jpg')))}")
+            
+            return {
+                'image_path': str(image_path),
+                'metadata_path': str(metadata_path),
+                'category': dicom_metadata['Classification']['Category'],
+                'stage': stage,
+                'filename': image_filename
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Error saving MRI for training: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise
 
     async def health_check(self) -> Dict[str, Any]:
         """Perform health check on MRI processor"""

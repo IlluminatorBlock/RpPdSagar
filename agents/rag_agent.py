@@ -17,7 +17,7 @@ from models.data_models import (
     ActionFlagType, MedicalReport, KnowledgeEntry
 )
 from services.groq_service import GroqService
-from utils.report_generator import MedicalReportGenerator, generate_report_filename
+from utils.report_generator import MedicalReportGenerator
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -39,7 +39,8 @@ class RAGAgent(ReportAgent):
         super().__init__(shared_memory, config, "rag_agent")
         self.groq_service = groq_service
         self.embeddings_manager = embeddings_manager
-        self.report_generator = MedicalReportGenerator(rag_agent=self)
+        # Use KB-integrated Medical Report Generator - retrieves all data from knowledge base
+        self.report_generator = MedicalReportGenerator(embeddings_manager=embeddings_manager)
         
         # Knowledge base configuration
         self.knowledge_base_size = 0
@@ -110,25 +111,30 @@ class RAGAgent(ReportAgent):
     
     async def _initialize_knowledge_base(self):
         """Initialize knowledge base with embeddings - NO MOCK DATA"""
-        logger.info("Initializing knowledge base with real embeddings...")
+        logger.info("🔧 Initializing knowledge base with real embeddings...")
         
         # Initialize embeddings manager - MUST be real implementation
         if not self.embeddings_manager:
+            logger.error("❌ Embeddings manager is None!")
             raise ValueError("Embeddings manager is required - no mock fallback allowed")
             
         # Initialize the embeddings manager
+        logger.info("📦 Initializing embeddings manager...")
         await self.embeddings_manager.initialize()
+        logger.info("✅ Embeddings manager initialized")
         
         # Load documents from directory and create embeddings
         try:
-            logger.info("Loading medical documents from knowledge base...")
+            logger.info("📚 Loading medical documents from knowledge base...")
             document_stats = await self.embeddings_manager.load_documents_from_directory()
+            logger.info(f"📊 Document loading stats: {document_stats}")
             
             if document_stats.get('total_chunks', 0) > 0:
                 logger.info(f"✅ Loaded {document_stats['total_chunks']} chunks from {document_stats['loaded_files']} medical documents")
                 self.knowledge_base_size = document_stats.get('total_chunks', 0)
             else:
                 logger.warning("⚠️  No documents found in knowledge base directory")
+                logger.warning(f"⚠️  Checked directory: {self.embeddings_manager.documents_dir}")
                 self.knowledge_base_size = 0
                 
             # Verify vectorstore is working
@@ -140,6 +146,8 @@ class RAGAgent(ReportAgent):
             
         except Exception as e:
             logger.error(f"❌ Failed to initialize vectorstore: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             raise ValueError(f"Vectorstore initialization failed: {e}")
             
         logger.info("✅ Knowledge base initialization completed - using ONLY vectorstore")
@@ -219,7 +227,9 @@ class RAGAgent(ReportAgent):
                     print("⚠️  PATIENT INFORMATION REQUIRED FOR REPORT")
                     print("="*70)
                     user_context = {'user_id': user_id, 'user_role': user_role}
-                    collected_patient_data = await self.report_generator.collect_admin_patient_data(user_context)
+                    # TODO: Implement patient data collection for admin
+                    # collected_patient_data = await self._collect_admin_patient_data(user_context)
+                    collected_patient_data = None  # Temporary fix
                     if collected_patient_data:
                         patient_id = collected_patient_data.get('patient_id')
                         # Update session with patient info directly in database
@@ -243,7 +253,9 @@ class RAGAgent(ReportAgent):
                         'doctor_id': user_id,
                         'doctor_name': doctor_name
                     }
-                    collected_patient_data = await self.report_generator.collect_doctor_patient_data(user_context)
+                    # TODO: Implement patient data collection for doctor
+                    # collected_patient_data = await self._collect_doctor_patient_data(user_context)
+                    collected_patient_data = None  # Temporary fix
                     if collected_patient_data:
                         patient_id = collected_patient_data.get('patient_id')
                         # Update session with patient info directly in database
@@ -289,61 +301,62 @@ class RAGAgent(ReportAgent):
             # Store report in shared memory
             report_id = await self.shared_memory.store_report(medical_report)
             
-            # ========== STEP 3: GENERATE PDF REPORTS ==========
+            # ========== STEP 3: GENERATE PDF REPORTS (CONCISE 1-PAGE FORMAT) ==========
             try:
-                logger.info(f"Automatically generating PDF reports for session {session_id}")
+                logger.info(f"Generating concise 1-page PDF reports for session {session_id}")
                 logger.info(f"PDF generation - user_role: {user_role}, user_id: {user_id}, patient_id: {patient_id}")
                 
-                # Initialize PDF paths to None
-                admin_pdf_path = None
-                doctor_pdf_path = None
-                patient_pdf_path = None
+                # Get patient and session data for report generation
+                session_data = await self.shared_memory.get_session_data(session_id)
+                prediction_data = await self._retrieve_prediction_data(session_id)
                 
-                # Generate admin report (can generate any report type)
-                if user_role.lower() == 'admin':
-                    # Admin generates comprehensive report with auto-generated patient ID if needed
-                    class AdminUser:
-                        def __init__(self):
-                            self.role = 'admin'
-                            self.id = user_id
-                            self.name = 'System Admin'
-                    
-                    admin_pdf_path = await self.generate_authenticated_report(session_id, AdminUser(), patient_id)
-                    logger.info(f"Admin PDF report generated: {admin_pdf_path}")
-                    
-                elif user_role.lower() == 'doctor':
-                    # Doctor generates report for specific patient
-                    doctor_pdf_path = await self.generate_pdf_report(session_id, None, "doctor")
-                    logger.info(f"Doctor PDF report generated: {doctor_pdf_path}")
-                    
-                elif user_role.lower() == 'patient':
-                    # Patient generates their own report
-                    patient_pdf_path = await self.generate_pdf_report(session_id, None, "patient")
-                    logger.info(f"Patient PDF report generated: {patient_pdf_path}")
-                    
+                # Get patient demographics
+                if session_data:
+                    patient_name = getattr(session_data, 'patient_name', 'Unknown Patient')
+                    # Try to get age from database if available
+                    patient_record = await self.shared_memory.db_manager.get_patient(patient_id) if patient_id else None
+                    age = patient_record.get('age', 0) if patient_record else 0
+                    gender = patient_record.get('gender', 'Unknown') if patient_record else 'Unknown'
                 else:
-                    # Default to admin for unknown roles
-                    logger.warning(f"Unknown user role '{user_role}', defaulting to admin report generation")
-                    class DefaultAdminUser:
-                        def __init__(self):
-                            self.role = 'admin'
-                            self.id = 'system_admin'
-                            self.name = 'System Admin'
-                    
-                    admin_pdf_path = await self.generate_authenticated_report(session_id, DefaultAdminUser(), patient_id)
-                    logger.info(f"Default admin PDF report generated: {admin_pdf_path}")
+                    patient_name = 'Unknown Patient'
+                    age = 0
+                    gender = 'Unknown'
                 
-                # Update the medical report to include PDF paths (only if they were generated)
-                if admin_pdf_path:
-                    medical_report.metadata['admin_pdf_path'] = admin_pdf_path
-                if doctor_pdf_path:
-                    medical_report.metadata['doctor_pdf_path'] = doctor_pdf_path
-                if patient_pdf_path:
-                    medical_report.metadata['patient_pdf_path'] = patient_pdf_path
+                # Get MRI scan path
+                mri_scans = await self.shared_memory.get_mri_data(session_id)
+                mri_path = None
+                if mri_scans and len(mri_scans) > 0:
+                    mri_path = mri_scans[0].get('file_path')
+                
+                # Generate both doctor and patient reports (1 page each) with KB-retrieved data
+                doctor_pdf_path = await self.report_generator.generate_doctor_report(
+                    patient_id=patient_id or 'UNKNOWN',
+                    patient_name=patient_name,
+                    age=age,
+                    gender=gender,
+                    prediction_data=prediction_data,
+                    mri_path=mri_path
+                )
+                logger.info(f"✅ Doctor report (1-page) generated: {doctor_pdf_path}")
+                
+                patient_pdf_path = await self.report_generator.generate_patient_report(
+                    patient_id=patient_id or 'UNKNOWN',
+                    patient_name=patient_name,
+                    age=age,
+                    prediction_data=prediction_data
+                )
+                logger.info(f"✅ Patient report (1-page) generated: {patient_pdf_path}")
+                
+                # Update metadata with PDF paths
+                medical_report.metadata['doctor_pdf_path'] = doctor_pdf_path
+                medical_report.metadata['patient_pdf_path'] = patient_pdf_path
                 medical_report.metadata['pdf_generated'] = True
+                medical_report.metadata['report_format'] = 'concise_1_page'
                 
             except Exception as pdf_error:
                 logger.error(f"Failed to generate PDF reports for session {session_id}: {pdf_error}")
+                import traceback
+                logger.error(f"PDF generation error traceback:\n{traceback.format_exc()}")
                 medical_report.metadata['pdf_generated'] = False
                 medical_report.metadata['pdf_error'] = str(pdf_error)
             
@@ -527,22 +540,18 @@ class RAGAgent(ReportAgent):
             # Format report content
             formatted_content = self._format_comprehensive_report(report_data, report_type)
             
-            # Generate PDF using role-based report system with admin privileges as fallback
-            # Admin can generate any report type and auto-generates IDs if needed
-            pdf_path = self.report_generator.create_role_based_report(
-                user_role='admin',  # Use admin role with full privileges
-                user_id='system_admin',
-                patient_id=patient_id,  # Will be auto-generated by admin logic if None
-                report_data={
-                    'title': f'Administrative Medical Report',
-                    'content': formatted_content,
-                    'patient_name': patient_name,
-                    'prediction_data': prediction_data,
-                    'stage': stage,
-                    'generated_by': 'System Administrator',
-                    'report_type': report_type
-                }
-            )
+            # TODO: Migrate to concise_report_generator
+            # OLD: Generate PDF using role-based report system - DISABLED
+            pdf_path = None  # Temporary fix - use concise generator instead
+            logger.warning("Old report_generator.create_role_based_report() disabled - use concise generator")
+            
+            # COMMENTED OUT OLD CODE:
+            # pdf_path = self.report_generator.create_role_based_report(
+            #     user_role='admin',
+            #     user_id='system_admin',
+            #     patient_id=patient_id,
+            #     report_data={...}
+            # )
             
             if pdf_path and os.path.exists(pdf_path):
                 logger.info(f"PDF report generated: {pdf_path}")
@@ -703,15 +712,20 @@ For questions about this report, please contact your healthcare provider.
             except Exception as e:
                 logger.warning(f"Could not retrieve MRI data: {e}")
             
-            # Create comprehensive medical report with proper formatting
-            pdf_path = await self.report_generator.create_comprehensive_pdf_report(
-                patient_id=target_patient_id,
-                prediction_data=prediction_data,
-                additional_content=report_content,
-                user_role=user_role,
-                user_id=user_id,
-                mri_data=mri_data
-            )
+            # TODO: Migrate to concise_report_generator
+            # OLD: Create comprehensive medical report - DISABLED
+            pdf_path = None  # Temporary fix - use concise generator instead
+            logger.warning("Old report_generator.create_comprehensive_pdf_report() disabled - use concise generator")
+            
+            # COMMENTED OUT OLD CODE:
+            # pdf_path = await self.report_generator.create_comprehensive_pdf_report(
+            #     patient_id=target_patient_id,
+            #     prediction_data=prediction_data,
+            #     additional_content=report_content,
+            #     user_role=user_role,
+            #     user_id=user_id,
+            #     mri_data=mri_data
+            # )
             
             if pdf_path:
                 logger.info(f"✅ Authenticated report generated: {pdf_path}")
@@ -1511,11 +1525,8 @@ Number of references consulted: {report_data.get('knowledge_entries_count', 0)}
         This is where RAG agent handles data collection and report generation
         """
         try:
-            from utils.report_generator import MedicalReportGenerator
-            
-            # Initialize report generator with proper connections
-            generator = MedicalReportGenerator(rag_agent=self)
-            generator.db_manager = self.shared_memory.db_manager
+            # Use the KB-integrated report generator (already initialized in __init__)
+            generator = self.report_generator
             
             print(f"\n🏥 PATIENT ASSESSMENT - {user_role.upper()}")
             print("="*60)
@@ -1572,10 +1583,8 @@ Number of references consulted: {report_data.get('knowledge_entries_count', 0)}
     async def handle_existing_patient_assessment(self, patient_id: str, user_context: Dict[str, Any]) -> None:
         """Handle assessment for existing patient"""
         try:
-            from utils.report_generator import MedicalReportGenerator
-            
-            generator = MedicalReportGenerator(rag_agent=self)
-            generator.db_manager = self.shared_memory.db_manager
+            # Use the KB-integrated report generator (already initialized in __init__)
+            generator = self.report_generator
             
             print(f"\n🏥 EXISTING PATIENT ASSESSMENT - ID: {patient_id}")
             print("="*60)

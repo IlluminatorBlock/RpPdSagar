@@ -207,20 +207,26 @@ class DatabaseManager:
             await db.execute("PRAGMA foreign_keys = ON;")
             
             # Create all tables (IF NOT EXISTS will skip existing ones)
+            # Core user management tables
             await self._create_users_table(db)
             await self._create_doctors_table(db)
             await self._create_patients_table(db)
-            # NOTE: Removed old _create_reports_table() - deprecated, use medical_reports instead
-            await self._create_embeddings_table(db)
-            await self._create_audit_logs_table(db)
+            
+            # Session and workflow tables
             await self._create_sessions_table(db)
             await self._create_mri_scans_table(db)
             await self._create_predictions_table(db)
-            await self._create_medical_reports_table(db)  # This is the NEW reports table
-            await self._create_knowledge_entries_table(db)
-            await self._create_lab_results_table(db)
+            await self._create_medical_reports_table(db)
             await self._create_action_flags_table(db)
+            
+            # Agent communication and knowledge base
+            await self._create_knowledge_entries_table(db)
             await self._create_agent_messages_table(db)
+            
+            # NOTE: Following tables are REMOVED (never used in codebase):
+            # - embeddings table (embeddings handled by FAISS in files)
+            # - audit_logs table (not implemented yet)
+            # - lab_results table (not implemented yet)
             
             # Enhanced tables for admin CRUD and patient history
             await self._create_doctor_patient_assignments_table(db)
@@ -326,51 +332,12 @@ class DatabaseManager:
     # This method has been deleted to avoid confusion and data duplication
     # The new medical_reports table provides enhanced functionality
 
-    async def _create_embeddings_table(self, db: aiosqlite.Connection):
-        """Create embeddings table for vector storage"""
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS embeddings (
-                embedding_id TEXT PRIMARY KEY,
-                content_id TEXT NOT NULL,
-                content_type TEXT NOT NULL CHECK (content_type IN ('report', 'knowledge', 'document')),
-                text_content TEXT NOT NULL,
-                embedding_vector BLOB NOT NULL,
-                model_name TEXT NOT NULL,
-                chunk_index INTEGER DEFAULT 0,
-                metadata JSON,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_content_id ON embeddings(content_id);")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_content_type ON embeddings(content_type);")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_model ON embeddings(model_name);")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_created_at ON embeddings(created_at);")
-
-    async def _create_audit_logs_table(self, db: aiosqlite.Connection):
-        """Create audit logs table for tracking all system actions"""
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS audit_logs (
-                log_id TEXT PRIMARY KEY,
-                action TEXT NOT NULL,
-                actor_id TEXT NOT NULL,
-                actor_role TEXT NOT NULL CHECK (actor_role IN ('admin', 'doctor', 'patient')),
-                target_id TEXT,
-                target_type TEXT,
-                details JSON,
-                ip_address TEXT,
-                user_agent TEXT,
-                success BOOLEAN DEFAULT 1,
-                error_message TEXT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_actor_id ON audit_logs(actor_id);")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_target_id ON audit_logs(target_id);")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp);")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_success ON audit_logs(success);")
-
+    # NOTE: Unused tables removed - embeddings, audit_logs, lab_results
+    # These tables were defined but never used in the codebase:
+    # - embeddings: Handled by EmbeddingsManager with FAISS (file-based storage)
+    # - audit_logs: Logging feature not yet implemented
+    # - lab_results: Lab integration not yet implemented
+    
     async def _create_sessions_table(self, db: aiosqlite.Connection):
         """Create sessions table"""
         await db.execute("""
@@ -495,28 +462,6 @@ class DatabaseManager:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_category ON knowledge_entries(category);")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_source_type ON knowledge_entries(source_type);")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_credibility ON knowledge_entries(credibility_score);")
-    
-    async def _create_lab_results_table(self, db: aiosqlite.Connection):
-        """Create lab results table"""
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS lab_results (
-                id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                test_type TEXT NOT NULL,
-                test_name TEXT NOT NULL,
-                value TEXT NOT NULL,
-                unit TEXT,
-                reference_range TEXT,
-                interpretation TEXT,
-                test_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                metadata JSON,
-                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-            );
-        """)
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_lab_results_session_id ON lab_results(session_id);")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_lab_results_test_type ON lab_results(test_type);")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_lab_results_interpretation ON lab_results(interpretation);")
     
     async def _create_action_flags_table(self, db: aiosqlite.Connection):
         """Create action flags table"""
@@ -2274,11 +2219,15 @@ class DatabaseManager:
                 """)
                 failed_reports = (await failed_count.fetchone())[0]
                 
-                # Patients with Parkinson's
+                # Patients with Parkinson's (based on predictions)
                 parkinsons_count = await db.execute("""
-                    SELECT COUNT(*) FROM patients WHERE parkinsons_status = 'Detected'
+                    SELECT COUNT(DISTINCT p.patient_id) 
+                    FROM patients p
+                    INNER JOIN sessions s ON s.patient_id = p.patient_id
+                    INNER JOIN predictions pr ON pr.session_id = s.session_id
+                    WHERE pr.binary_result = 'Positive'
                 """)
-                parkinsons_patients = (await parkinsons_count.fetchone())[0]
+                parkinsons_patients = (await parkinsons_count.fetchone())[0] or 0
                 
                 # Recent activity (last 24 hours)
                 yesterday = (datetime.now() - timedelta(days=1)).isoformat()

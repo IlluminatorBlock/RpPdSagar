@@ -125,6 +125,7 @@ models/*.pkl
 models/*.joblib
 models/final_model.keras
 models/parkinsons_model.keras
+models/model.onnx
 
 # API Keys and Secrets (should NEVER be committed)
 config/secrets.py

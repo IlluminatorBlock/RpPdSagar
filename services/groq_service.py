@@ -209,7 +209,7 @@ class GroqService:
             GroqMessage(role="user", content=user_message)
         ]
         
-        response = await self._make_request(messages, temperature=0.7, max_tokens=800)
+        response = await self._make_request(messages, temperature=0.7, max_tokens=2500)
         return response.content
     
     # Prediction Support - For AI/ML Agent

@@ -641,11 +641,20 @@ async def main():
             print("   'history' - View your medical history")
         elif user_role == "admin":
             print("   'users' - Manage system users")
+            print("   'doctors' - List all doctors")
+            print("   'patients' - List all patients")
+            print("   'dashboard' - System overview")
+            print("   'upload <file_path>' - Upload and analyze MRI scan")
+            print("   'analyze' - Start MRI analysis workflow")
             print("   'system' - System administration")
             print("   'search <query>' - Search knowledge base")
             print("   'kb <query>' - Query knowledge base via RAG")
             print("   'stats' - View system statistics")
             print("   'logs' - View recent system logs")
+            print("\n   💡 Natural Language MRI Commands:")
+            print("      • 'get report on \"path/to/scan.jpg\"'")
+            print("      • 'analyze \"path/to/scan.jpg\"'")
+            print("      • 'predict result for \"path/to/scan.jpg\"'")
         
         print("\n💬 You can also ask medical questions or describe symptoms...")
         print("    Example: 'I have tremors in my hands' or 'Analyze MRI scan'")
@@ -657,6 +666,11 @@ async def main():
                 
                 if user_input.lower() in ['quit', 'exit']:
                     break
+                elif user_input.lower() in ['clear', 'cls']:
+                    # Clear the screen
+                    import os
+                    os.system('cls' if os.name == 'nt' else 'clear')
+                    continue
                 elif user_input.lower() == 'health':
                     health = await system.health_check()
                     print(f"📊 System Health: {health.get('system_status', 'unknown')}")
@@ -706,6 +720,33 @@ async def main():
                 elif user_role == "admin" and user_input.lower() == 'logs':
                     await handle_admin_logs_command(system)
                 
+                # Admin MRI upload and analysis (with natural language variations)
+                elif user_role == "admin" and user_input.lower().startswith('upload '):
+                    file_path = user_input[7:].strip().strip('"')  # Remove quotes if present
+                    await handle_admin_mri_upload(system, file_path)
+                
+                elif user_role == "admin" and user_input.lower() == 'analyze':
+                    await handle_admin_mri_analysis(system)
+                
+                # Natural language MRI analysis commands
+                elif user_role == "admin" and any(phrase in user_input.lower() for phrase in [
+                    'analyze', 'report on', 'get report', 'predict', 'diagnose', 'scan', 'mri'
+                ]) and any(ext in user_input.lower() for ext in ['.jpg', '.jpeg', '.png', '.dicom', '.dcm']):
+                    # Extract file path from natural language command
+                    import re
+                    # Look for quoted path or path with backslashes
+                    path_match = re.search(r'["\']([^"\']+\.(jpg|jpeg|png|dicom|dcm))["\']', user_input, re.IGNORECASE)
+                    if not path_match:
+                        path_match = re.search(r'([A-Za-z]:\\[^"\']+\.(jpg|jpeg|png|dicom|dcm))', user_input, re.IGNORECASE)
+                    
+                    if path_match:
+                        file_path = path_match.group(1)
+                        print(f"🔍 Detected MRI analysis request for: {file_path}")
+                        await handle_admin_mri_upload(system, file_path)
+                    else:
+                        print("❌ Could not extract file path from command")
+                        print("💡 Try: upload \"C:\\path\\to\\scan.jpg\"")
+                
                 # SMART CRUD INTERPRETER - handles natural language admin commands
                 elif user_role == "admin" and user_input:
                     # Try smart CRUD command interpretation
@@ -717,7 +758,9 @@ async def main():
                     ]
                     
                     # Check if command contains CRUD keywords
-                    if any(keyword in user_input.lower() for keyword in smart_crud_keywords):
+                    is_crud_command = any(keyword in user_input.lower() for keyword in smart_crud_keywords)
+                    
+                    if is_crud_command:
                         print("🤖 Processing admin command...")
                         try:
                             crud_response = await system.supervisor_agent.handle_smart_crud_command(
@@ -728,7 +771,32 @@ async def main():
                         except Exception as e:
                             print(f"❌ Error executing command: {e}")
                             logger.error(f"CRUD command error: {e}")
-                    # If not a CRUD keyword, fall through to regular processing below
+                    else:
+                        # Not a CRUD command, process as regular chat/medical query
+                        print("🤖 Processing your request...")
+                        
+                        # Add user context to metadata
+                        metadata = user_context.copy()
+                        metadata.update({
+                            "timestamp": asyncio.get_event_loop().time(),
+                            "input_type": "text_query"
+                        })
+                        
+                        try:
+                            response = await system.process_user_input(user_input, metadata)
+                            
+                            # Display response
+                            if hasattr(response, 'content'):
+                                response_text = response.content
+                            else:
+                                response_text = response.get('message', 'No response generated')
+                            
+                            print(f"🏥 System Response:")
+                            print(f"   {response_text}")
+                            
+                        except Exception as e:
+                            print(f"❌ Error processing request: {e}")
+                            logger.error(f"Error processing user input: {e}")
                     
                 elif user_input:
                     # Process medical query through the multiagent system
@@ -1078,6 +1146,159 @@ async def handle_admin_logs_command(system):
         
     except Exception as e:
         print(f"❌ Error reading logs: {e}")
+
+
+async def handle_admin_mri_upload(system, file_path):
+    """Handle admin MRI upload and analysis"""
+    print(f"\n🔬 ADMIN MRI UPLOAD & ANALYSIS")
+    print("=" * 70)
+    
+    try:
+        import os
+        from pathlib import Path
+        
+        # Validate file exists
+        if not os.path.exists(file_path):
+            print(f"❌ File not found: {file_path}")
+            print(f"💡 Make sure the file path is correct")
+            return
+        
+        print(f"📁 File: {Path(file_path).name}")
+        print(f"📍 Path: {file_path}")
+        
+        # Get patient information
+        print(f"\n👤 PATIENT INFORMATION")
+        print("-" * 70)
+        patient_id = input("   Patient ID (or press Enter to create new): ").strip()
+        
+        if not patient_id:
+            # Create new patient
+            print(f"\n📝 Creating new patient...")
+            patient_name = input("   Patient Name: ").strip()
+            age = input("   Age: ").strip()
+            gender = input("   Gender (M/F/Other): ").strip()
+            contact = input("   Contact Info (optional): ").strip() or None
+            
+            # Create patient in database
+            patient_data = {
+                'name': patient_name,
+                'age': int(age) if age.isdigit() else 0,
+                'gender': gender,
+                'contact_info': contact,
+                'medical_history': {},
+                'created_by_admin': True
+            }
+            
+            patient_id = await system.shared_memory.db_manager.create_patient(patient_data)
+            print(f"✅ Patient created with ID: {patient_id}")
+        else:
+            # Verify patient exists
+            patient = await system.shared_memory.db_manager.get_patient(patient_id)
+            if not patient:
+                print(f"❌ Patient not found: {patient_id}")
+                print(f"💡 Use 'patients' command to see all patients")
+                return
+            print(f"✅ Patient found: {patient.get('name', 'Unknown')}")
+        
+        # Create session
+        print(f"\n🔄 Creating analysis session...")
+        session_id = await system.create_session(
+            input_type="mri_scan",
+            metadata={
+                'user_role': 'admin',
+                'user_id': system.current_user.get('id'),
+                'patient_id': patient_id,
+                'admin_upload': True
+            }
+        )
+        
+        # Upload MRI
+        print(f"📤 Uploading MRI scan...")
+        mri_processor = system.mri_processor
+        
+        # Read file and store in database
+        with open(file_path, 'rb') as f:
+            binary_data = f.read()
+        
+        mri_id = await system.shared_memory.db_manager.store_mri_scan(
+            session_id=session_id,
+            file_path=file_path,
+            binary_data=binary_data,
+            original_filename=Path(file_path).name,
+            file_size=len(binary_data),
+            mime_type='image/jpeg'
+        )
+        
+        print(f"✅ MRI uploaded successfully (ID: {mri_id})")
+        
+        # Trigger prediction
+        print(f"\n🤖 Starting AI analysis...")
+        await system.shared_memory.set_action_flag(
+            flag_type='PREDICT_PARKINSONS',
+            session_id=session_id,
+            data={'mri_scan_id': mri_id, 'patient_id': patient_id}
+        )
+        
+        # Wait for prediction (with timeout)
+        print(f"⏳ Analyzing MRI scan (this may take a moment)...")
+        import asyncio
+        max_wait = 30  # 30 seconds timeout
+        waited = 0
+        
+        while waited < max_wait:
+            await asyncio.sleep(2)
+            waited += 2
+            
+            # Check if prediction is complete
+            predictions = await system.shared_memory.db_manager.get_predictions_for_session(session_id)
+            if predictions:
+                prediction = predictions[0]
+                print(f"\n✅ ANALYSIS COMPLETE!")
+                print(f"=" * 70)
+                print(f"   Result: {prediction.get('binary_result', 'Unknown')}")
+                print(f"   Stage: Hoehn & Yahr Stage {prediction.get('stage_result', 'N/A')}")
+                print(f"   Confidence: {prediction.get('confidence_score', 0)*100:.1f}%")
+                print(f"=" * 70)
+                
+                # Generate report
+                print(f"\n📄 Generating medical reports...")
+                await system.shared_memory.set_action_flag(
+                    flag_type='GENERATE_REPORT',
+                    session_id=session_id,
+                    data={'prediction_id': prediction.get('prediction_id'), 'patient_id': patient_id}
+                )
+                
+                # Wait for report
+                await asyncio.sleep(5)
+                print(f"✅ Reports generated! Check data/reports/ folder")
+                
+                return
+        
+        print(f"⚠️ Analysis timeout - check 'logs' for details")
+        
+    except Exception as e:
+        print(f"❌ Upload error: {e}")
+        import traceback
+        logger.error(f"Admin MRI upload error:\n{traceback.format_exc()}")
+
+
+async def handle_admin_mri_analysis(system):
+    """Handle admin workflow for MRI analysis"""
+    print(f"\n🔬 ADMIN MRI ANALYSIS WORKFLOW")
+    print("=" * 70)
+    print(f"💡 This will guide you through:")
+    print(f"   1. Upload MRI scan")
+    print(f"   2. Select/create patient")
+    print(f"   3. Run AI analysis")
+    print(f"   4. Generate medical reports")
+    print("=" * 70)
+    
+    file_path = input("\n📁 Enter MRI file path: ").strip().strip('"')
+    
+    if file_path:
+        await handle_admin_mri_upload(system, file_path)
+    else:
+        print("❌ No file path provided")
 
 
 if __name__ == "__main__":

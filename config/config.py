@@ -30,7 +30,7 @@ class Config:
     """Central configuration management"""
     
     def __init__(self):
-        self.base_dir = Path(__file__).parent
+        self.base_dir = Path(__file__).parent.parent  # Go up one level from config/ directory
         self.data_dir = self.base_dir / "data"
         self.logs_dir = self.base_dir / "logs"
         

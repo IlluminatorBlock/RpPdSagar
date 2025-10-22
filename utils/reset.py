@@ -242,7 +242,7 @@ class SystemReset:
                 # KB-related directory names to preserve
                 preserve_dirs = {
                     'documents', 'kb', 'knowledge_base', 'docs', 
-                    'knowledge', 'kb_docs', 'document_store'
+                    'knowledge', 'kb_docs', 'document_store', 'document'
                 }
                 
                 # Embedding file extensions to delete
@@ -296,7 +296,7 @@ class SystemReset:
 
     def reset_data_directories(self) -> bool:
         """
-        Clean up data directories (selective cleaning)
+        Clean up data directories (selective cleaning - preserves MRI training dataset)
         
         Returns:
             True if successful, False otherwise
@@ -306,7 +306,6 @@ class SystemReset:
 
             # Directories to completely clean (delete everything inside)
             dirs_to_clean = [
-                self.data_dir / "mri_scans",
                 self.data_dir / "reports",
                 self.data_dir / "temp",
                 self.data_dir / "cache",
@@ -347,6 +346,35 @@ class SystemReset:
             else:
                 docs_dir.mkdir(parents=True, exist_ok=True)
                 logger.info(f"    ✓ Created documents directory")
+            
+            # Handle MRI scans directory selectively (only remove temp files, preserve training dataset)
+            mri_dir = self.data_dir / "mri_scans"
+            if mri_dir.exists():
+                logger.info(f"    🛡️  Preserving MRI training dataset structure")
+                temp_patterns = ['*.tmp', '*.temp', '*.cache', '*.lock', '*~', '*.bak']
+                for pattern in temp_patterns:
+                    for temp_file in mri_dir.rglob(pattern):
+                        if self._force_delete_path(temp_file):
+                            files_deleted += 1
+                
+                # Clean only uploaded MRI files (not in training dataset structure)
+                for item in mri_dir.iterdir():
+                    if item.is_file():  # Only delete loose files, not directories
+                        if self._force_delete_path(item):
+                            files_deleted += 1
+                
+                logger.info(f"    ✓ Cleaned loose MRI files (preserved training dataset structure)")
+            else:
+                mri_dir.mkdir(parents=True, exist_ok=True)
+                # Create training dataset structure
+                for category in ['positive', 'negative']:
+                    category_dir = mri_dir / category
+                    category_dir.mkdir(exist_ok=True)
+                    if category == 'positive':
+                        for stage in range(1, 6):
+                            stage_dir = category_dir / f'stage_{stage}'
+                            stage_dir.mkdir(exist_ok=True)
+                logger.info(f"    ✓ Created MRI training dataset structure")
 
             logger.info(f"📂 Data directories reset: {files_deleted} files, {dirs_cleaned} directories cleaned")
             return True
