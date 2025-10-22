@@ -14,9 +14,23 @@ import numpy as np
 from datetime import datetime
 from pathlib import Path
 import hashlib
+import warnings
+import os
 
-# Configure logging
+# Suppress verbose warnings from ML libraries
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=UserWarning)
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TensorFlow messages
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'  # Suppress tokenizers warning
+
+# Configure logging for this module
 logger = logging.getLogger(__name__)
+
+# Suppress verbose output from related libraries
+logging.getLogger('sentence_transformers').setLevel(logging.ERROR)
+logging.getLogger('transformers').setLevel(logging.ERROR)
+logging.getLogger('torch').setLevel(logging.ERROR)
+logging.getLogger('tensorflow').setLevel(logging.ERROR)
 
 # Note: In production, these would be real embedding libraries
 # For development, we'll use mock implementations
@@ -24,7 +38,7 @@ try:
     # Import sentence transformers only when available
     from sentence_transformers import SentenceTransformer   
     SENTENCE_TRANSFORMERS_AVAILABLE = True
-    logger.info("sentence-transformers import check passed")
+    logger.info("✓ Sentence transformers available")
 except ImportError:
     SENTENCE_TRANSFORMERS_AVAILABLE = False
     logger.warning("sentence-transformers not available - using mock embeddings")
@@ -32,10 +46,10 @@ except ImportError:
 try:
     import faiss
     FAISS_AVAILABLE = True
-    logger.info("faiss successfully imported")
+    logger.debug("✓ FAISS available")
 except ImportError:
     FAISS_AVAILABLE = False
-    logger.warning("faiss not available - using simple similarity search")
+    logger.warning("FAISS not available - using simple similarity search")
 
 
 class EmbeddingsManager:
@@ -91,21 +105,19 @@ class EmbeddingsManager:
     async def initialize(self):
         """Initialize the embeddings model and index"""
         try:
-            logger.info("Initializing embeddings model...")
-            
             if SENTENCE_TRANSFORMERS_AVAILABLE:
-                logger.info(f"Loading sentence transformer model: {self.model_name}")
+                logger.info(f"Loading model: {self.model_name}")
                 # Import and load the actual model - this may take some time
                 try:
                     self.model = SentenceTransformer(self.model_name)
-                    logger.info("Sentence transformer model loaded successfully")
+                    logger.info("✓ Model loaded")
                     self.using_real_embeddings = True
                 except Exception as e:
-                    logger.warning(f"Failed to load sentence transformer model: {e}")
+                    logger.warning(f"Failed to load model: {e}")
                     self.model = None
                     self.using_real_embeddings = False
             else:
-                logger.warning("Sentence transformers not available - using mock embeddings")
+                logger.warning("Using mock embeddings")
                 self.model = None
                 self.using_real_embeddings = False
             
@@ -115,7 +127,7 @@ class EmbeddingsManager:
             # Load existing embeddings if available
             await self._load_existing_embeddings()
             
-            logger.info("Embeddings manager initialized successfully")
+            logger.info("✓ Embeddings manager ready")
             
         except Exception as e:
             logger.error(f"Failed to initialize embeddings manager: {e}")

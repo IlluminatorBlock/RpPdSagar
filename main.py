@@ -19,6 +19,19 @@ import sys
 import uuid
 from typing import Optional, Dict, Any
 from pathlib import Path
+import warnings
+
+# Suppress verbose warnings and info messages from external libraries
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=UserWarning)
+
+# Suppress verbose output from sentence_transformers, transformers, and other ML libraries
+logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
+logging.getLogger('transformers').setLevel(logging.WARNING)
+logging.getLogger('torch').setLevel(logging.WARNING)
+logging.getLogger('tensorflow').setLevel(logging.ERROR)
+logging.getLogger('faiss').setLevel(logging.WARNING)
+logging.getLogger('filelock').setLevel(logging.WARNING)
 
 # Add project root to path
 project_root = Path(__file__).parent
@@ -678,26 +691,44 @@ async def main():
                     doctor_name = system.current_user.get("assigned_doctor_name", "Not assigned")
                     print(f"👨‍⚕️ Assigned Doctor: {doctor_name}")
                 
-                # Enhanced Admin Commands
-                elif user_input.lower() == 'users' and user_role == "admin":
-                    await handle_admin_users_command(system)
-                    
-                elif user_input.lower() == 'system' and user_role == "admin":
+                # Enhanced Admin Commands with Smart CRUD Interpreter
+                elif user_role == "admin" and user_input.lower() == 'system':
                     await handle_admin_system_command(system)
                     
-                elif user_input.lower().startswith('search ') and user_role == "admin":
+                elif user_role == "admin" and user_input.lower().startswith('search '):
                     query = user_input[7:].strip()
                     await handle_admin_search_command(system, query)
                     
-                elif user_input.lower().startswith('kb ') and user_role == "admin":
+                elif user_role == "admin" and user_input.lower().startswith('kb '):
                     kb_query = user_input[3:].strip()
                     await handle_admin_kb_command(system, kb_query)
                     
-                elif user_input.lower() == 'stats' and user_role == "admin":
-                    await handle_admin_stats_command(system)
-                    
-                elif user_input.lower() == 'logs' and user_role == "admin":
+                elif user_role == "admin" and user_input.lower() == 'logs':
                     await handle_admin_logs_command(system)
+                
+                # SMART CRUD INTERPRETER - handles natural language admin commands
+                elif user_role == "admin" and user_input:
+                    # Try smart CRUD command interpretation
+                    smart_crud_keywords = [
+                        'users', 'user', 'doctors', 'doctor', 'patients', 'patient',
+                        'admins', 'admin', 'stats', 'statistics', 'consultations',
+                        'dashboard', 'reports', 'pending', 'failed', 'show', 'list',
+                        'get', 'all', 'active', 'help', 'commands'
+                    ]
+                    
+                    # Check if command contains CRUD keywords
+                    if any(keyword in user_input.lower() for keyword in smart_crud_keywords):
+                        print("🤖 Processing admin command...")
+                        try:
+                            crud_response = await system.supervisor_agent.handle_smart_crud_command(
+                                user_input, 
+                                user_role
+                            )
+                            print(crud_response)
+                        except Exception as e:
+                            print(f"❌ Error executing command: {e}")
+                            logger.error(f"CRUD command error: {e}")
+                    # If not a CRUD keyword, fall through to regular processing below
                     
                 elif user_input:
                     # Process medical query through the multiagent system
@@ -828,13 +859,15 @@ async def handle_admin_users_command(system):
             last_login = user.get('last_login', 'Never')
             print(f"   {status} {user.get('username', 'Unknown')} ({user.get('role', 'unknown')}) - Last: {last_login}")
         
-        print(f"\n💡 User Management Operations:")
-        print(f"   To perform user operations, use these commands in a new session:")
-        print(f"   • Create user: python admin_tools.py create-user")
-        print(f"   • List all users: python admin_tools.py list-users") 
-        print(f"   • Update user: python admin_tools.py update-user <username>")
-        print(f"   • Deactivate user: python admin_tools.py deactivate-user <username>")
-        print(f"   • Reset password: python admin_tools.py reset-password <username>")
+        print(f"\n💡 Admin Operations:")
+        print(f"   All administrative operations are now available through the DatabaseManager class.")
+        print(f"   Use the following methods for user management:")
+        print(f"   • get_all_users() - List all users")
+        print(f"   • create_user() - Create new user")
+        print(f"   • update_user() - Update user details")
+        print(f"   • deactivate_user() - Deactivate user account")
+        print(f"   For patient management, doctor assignments, consultations, and reports,")
+        print(f"   use the comprehensive CRUD methods in core/database.py")
         
     except Exception as e:
         print(f"❌ Error accessing user data: {e}")

@@ -1023,6 +1023,295 @@ Confidence Score: {confidence_str}
             timestamp=datetime.now()
         )
     
+    async def handle_smart_crud_command(self, command: str, user_role: str = "admin") -> str:
+        """
+        Smart CRUD command interpreter - understands natural language admin commands
+        
+        Examples:
+            "users" → get all users
+            "doctors" → get all doctors  
+            "patients" → get all patients
+            "active users" → get active users
+            "show me consultations" → get recent consultations
+            "patient statistics" → get patient stats
+            
+        Args:
+            command: Natural language command from admin
+            user_role: User role (default: admin)
+            
+        Returns:
+            Formatted response string with requested data
+        """
+        db = self.shared_memory.db_manager
+        command_lower = command.lower().strip()
+        
+        try:
+            # ===== USER QUERIES =====
+            if command_lower in ['users', 'all users', 'show users', 'list users', 'get users']:
+                users = await db.get_all_users()
+                return self._format_users_response(users)
+            
+            elif 'active users' in command_lower or 'active user' in command_lower:
+                users = await db.get_active_users()
+                return self._format_users_response(users, title="Active Users")
+            
+            elif command_lower in ['doctors', 'all doctors', 'show doctors', 'list doctors']:
+                doctors = await db.get_users_by_role('doctor')
+                return self._format_users_response(doctors, title="Doctors")
+            
+            elif command_lower in ['admins', 'administrators', 'show admins']:
+                admins = await db.get_users_by_role('admin')
+                return self._format_users_response(admins, title="Administrators")
+            
+            # ===== PATIENT QUERIES =====
+            elif command_lower in ['patients', 'all patients', 'show patients', 'list patients', 'get patients']:
+                patients = await db.get_all_patients()
+                return self._format_patients_response(patients)
+            
+            elif 'patient stats' in command_lower or 'patient statistics' in command_lower:
+                stats = await db.get_all_patient_statistics(order_by='last_visit_date', limit=20)
+                return self._format_patient_statistics_response(stats)
+            
+            # ===== CONSULTATION QUERIES =====
+            elif 'consultations' in command_lower or 'consultation' in command_lower:
+                # Check if specific doctor is mentioned
+                if 'doctor' in command_lower:
+                    return "ℹ️  Please specify doctor ID: get_doctor_consultations(doctor_id)"
+                else:
+                    return "ℹ️  Available queries:\n   • get_patient_consultations(patient_id)\n   • get_doctor_consultations(doctor_id)"
+            
+            # ===== REPORT QUERIES =====
+            elif 'pending reports' in command_lower or 'pending report' in command_lower:
+                reports = await db.get_pending_reports()
+                return self._format_pending_reports_response(reports)
+            
+            elif 'failed reports' in command_lower or 'failed report' in command_lower:
+                reports = await db.get_failed_reports()
+                return self._format_failed_reports_response(reports)
+            
+            # ===== DASHBOARD QUERIES =====
+            elif command_lower in ['dashboard', 'system dashboard', 'admin dashboard', 'overview']:
+                dashboard = await db.get_system_dashboard()
+                return self._format_system_dashboard_response(dashboard)
+            
+            elif 'doctor dashboard' in command_lower:
+                return "ℹ️  Please specify doctor ID: get_doctor_dashboard(doctor_id)"
+            
+            elif 'patient dashboard' in command_lower:
+                return "ℹ️  Please specify patient ID: get_patient_dashboard(patient_id)"
+            
+            # ===== STATISTICS =====
+            elif 'stats' in command_lower or 'statistics' in command_lower:
+                dashboard = await db.get_system_dashboard()
+                return self._format_system_stats_response(dashboard)
+            
+            # ===== HELP =====
+            elif command_lower in ['help', 'commands', 'what can you do']:
+                return self._get_crud_help_message()
+            
+            # ===== UNKNOWN COMMAND =====
+            else:
+                return f"❓ Command not recognized: '{command}'\n\n💡 Try:\n   • 'users' - Show all users\n   • 'doctors' - Show all doctors\n   • 'patients' - Show all patients\n   • 'dashboard' - System overview\n   • 'help' - See all available commands"
+        
+        except Exception as e:
+            self.logger.error(f"CRUD command failed: {e}")
+            return f"❌ Error executing command: {str(e)}"
+    
+    def _format_users_response(self, users: list, title: str = "Users") -> str:
+        """Format users list for display"""
+        if not users:
+            return f"📋 {title}: No users found"
+        
+        response = f"\n👥 {title.upper()} ({len(users)} total)\n"
+        response += "=" * 60 + "\n\n"
+        
+        # Group by role
+        by_role = {}
+        for user in users:
+            role = user.get('role', 'unknown')
+            if role not in by_role:
+                by_role[role] = []
+            by_role[role].append(user)
+        
+        # Display by role
+        for role, role_users in sorted(by_role.items()):
+            response += f"\n📌 {role.upper()} ({len(role_users)}):\n"
+            for user in role_users[:10]:  # Show first 10 per role
+                status = "🟢" if user.get('is_active', True) else "🔴"
+                username = user.get('username', 'N/A')
+                full_name = user.get('full_name', 'N/A')
+                email = user.get('email', 'N/A')
+                last_login = user.get('last_login', 'Never')
+                
+                response += f"   {status} {username} - {full_name}\n"
+                response += f"      Email: {email}\n"
+                response += f"      Last Login: {last_login}\n"
+            
+            if len(role_users) > 10:
+                response += f"   ... and {len(role_users) - 10} more\n"
+        
+        return response
+    
+    def _format_patients_response(self, patients: list) -> str:
+        """Format patients list for display"""
+        if not patients:
+            return "📋 PATIENTS: No patients found"
+        
+        response = f"\n🏥 PATIENTS ({len(patients)} total)\n"
+        response += "=" * 60 + "\n\n"
+        
+        for i, patient in enumerate(patients[:20], 1):  # Show first 20
+            patient_name = patient.get('patient_name', 'N/A')
+            patient_id = patient.get('patient_id', 'N/A')[:8]  # Show first 8 chars of ID
+            age = patient.get('age', 'N/A')
+            gender = patient.get('gender', 'N/A')
+            
+            response += f"{i}. {patient_name} (ID: {patient_id}...)\n"
+            response += f"   Age: {age} | Gender: {gender}\n"
+        
+        if len(patients) > 20:
+            response += f"\n... and {len(patients) - 20} more patients\n"
+        
+        return response
+    
+    def _format_patient_statistics_response(self, stats: list) -> str:
+        """Format patient statistics for display"""
+        if not stats:
+            return "📊 PATIENT STATISTICS: No data available"
+        
+        response = f"\n📊 PATIENT STATISTICS (Top {len(stats)})\n"
+        response += "=" * 60 + "\n\n"
+        
+        for i, stat in enumerate(stats[:15], 1):
+            patient_name = stat.get('patient_name', 'N/A')
+            consultations = stat.get('total_consultations', 0)
+            scans = stat.get('total_mri_scans', 0)
+            reports = stat.get('total_reports', 0)
+            last_visit = stat.get('last_visit_date', 'N/A')
+            
+            response += f"{i}. {patient_name}\n"
+            response += f"   Consultations: {consultations} | Scans: {scans} | Reports: {reports}\n"
+            response += f"   Last Visit: {last_visit}\n\n"
+        
+        return response
+    
+    def _format_pending_reports_response(self, reports: list) -> str:
+        """Format pending reports for display"""
+        if not reports:
+            return "✅ No pending reports"
+        
+        response = f"\n📝 PENDING REPORTS ({len(reports)})\n"
+        response += "=" * 60 + "\n\n"
+        
+        for i, report in enumerate(reports, 1):
+            patient_name = report.get('patient_name', 'N/A')
+            report_type = report.get('report_type', 'N/A')
+            requested_date = report.get('requested_date', 'N/A')
+            status = report.get('status', 'N/A')
+            
+            response += f"{i}. {patient_name} - {report_type}\n"
+            response += f"   Status: {status}\n"
+            response += f"   Requested: {requested_date}\n\n"
+        
+        return response
+    
+    def _format_failed_reports_response(self, reports: list) -> str:
+        """Format failed reports for display"""
+        if not reports:
+            return "✅ No failed reports"
+        
+        response = f"\n❌ FAILED REPORTS ({len(reports)})\n"
+        response += "=" * 60 + "\n\n"
+        
+        for i, report in enumerate(reports, 1):
+            patient_name = report.get('patient_name', 'N/A')
+            report_type = report.get('report_type', 'N/A')
+            requested_date = report.get('requested_date', 'N/A')
+            error = report.get('error_message', 'Unknown error')
+            
+            response += f"{i}. {patient_name} - {report_type}\n"
+            response += f"   Error: {error}\n"
+            response += f"   Requested: {requested_date}\n\n"
+        
+        return response
+    
+    def _format_system_dashboard_response(self, dashboard: dict) -> str:
+        """Format system dashboard for display"""
+        if not dashboard:
+            return "❌ Dashboard data not available"
+        
+        response = f"\n🎯 SYSTEM DASHBOARD\n"
+        response += "=" * 60 + "\n\n"
+        
+        response += "📊 Overview:\n"
+        response += f"   Total Users: {dashboard.get('total_users', 0)}\n"
+        response += f"   Total Patients: {dashboard.get('total_patients', 0)}\n"
+        response += f"   Total Doctors: {dashboard.get('total_doctors', 0)}\n"
+        response += f"   Active Patients (30d): {dashboard.get('active_patients_30d', 0)}\n\n"
+        
+        response += "📝 Reports:\n"
+        response += f"   Pending: {dashboard.get('pending_reports', 0)}\n"
+        response += f"   Failed: {dashboard.get('failed_reports', 0)}\n\n"
+        
+        response += "🔬 Parkinson's Detection:\n"
+        response += f"   Detected Cases: {dashboard.get('parkinsons_patients', 0)}\n"
+        response += f"   Detection Rate: {dashboard.get('parkinsons_percentage', 0)}%\n\n"
+        
+        activity = dashboard.get('activity_24h', {})
+        response += "⚡ Last 24 Hours:\n"
+        response += f"   Scans: {activity.get('scans', 0)}\n"
+        response += f"   Predictions: {activity.get('predictions', 0)}\n"
+        response += f"   Reports: {activity.get('reports', 0)}\n"
+        
+        return response
+    
+    def _format_system_stats_response(self, dashboard: dict) -> str:
+        """Format system statistics (simplified)"""
+        if not dashboard:
+            return "❌ Statistics not available"
+        
+        response = f"\n📊 SYSTEM STATISTICS\n"
+        response += "=" * 60 + "\n\n"
+        
+        response += f"👥 Users: {dashboard.get('total_users', 0)}\n"
+        response += f"🏥 Patients: {dashboard.get('total_patients', 0)}\n"
+        response += f"👨‍⚕️ Doctors: {dashboard.get('total_doctors', 0)}\n"
+        response += f"📝 Pending Reports: {dashboard.get('pending_reports', 0)}\n"
+        response += f"🔬 Parkinson's Cases: {dashboard.get('parkinsons_patients', 0)} ({dashboard.get('parkinsons_percentage', 0)}%)\n"
+        
+        return response
+    
+    def _get_crud_help_message(self) -> str:
+        """Return help message for CRUD commands"""
+        return """
+🤖 SMART CRUD COMMANDS AVAILABLE
+================================
+
+👥 USER MANAGEMENT:
+   • users, show users, list users
+   • active users
+   • doctors, show doctors
+   • admins, administrators
+
+🏥 PATIENT MANAGEMENT:
+   • patients, show patients, list patients
+   • patient stats, patient statistics
+
+📝 REPORT MANAGEMENT:
+   • pending reports
+   • failed reports
+
+📊 DASHBOARDS & STATISTICS:
+   • dashboard, system dashboard
+   • stats, statistics
+
+❓ HELP:
+   • help, commands
+
+💡 Just type what you want to see in natural language!
+   Example: "show me all doctors" or "patient statistics"
+"""
+    
     async def health_check(self) -> Dict[str, Any]:
         """Health check for supervisor agent"""
         base_health = await super().health_check()
@@ -1035,6 +1324,7 @@ Confidence Score: {confidence_str}
                 "chat_mode": True,
                 "prediction_orchestration": True,
                 "report_orchestration": True,
-                "combined_workflows": True
+                "combined_workflows": True,
+                "smart_crud_commands": True
             }
         }
